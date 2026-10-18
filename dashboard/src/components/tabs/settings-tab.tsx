@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { copyText } from "../../lib/clipboard";
 import type { CaregiverProfile, RecipientProfile } from "../../lib/types";
+import { RecipientWizard } from "../recipient-wizard";
 import { Toast } from "../primitives/toast";
 import type { AgentInfo } from "../types";
 
@@ -41,6 +42,7 @@ export function SettingsTab({
   const [toastMsg, setToastMsg] = useState<string | null>(null);
   const [toastFallback, setToastFallback] = useState<string | undefined>(undefined);
   const [editing, setEditing] = useState(false);
+  const [showWizard, setShowWizard] = useState(false);
   const [saving, setSaving] = useState(false);
   const [form, setForm] = useState({
     recipientName: "",
@@ -122,6 +124,7 @@ export function SettingsTab({
           setToastFallback(undefined);
         }}
       />
+      {showWizard && <RecipientWizard onClose={() => setShowWizard(false)} />}
       <div className="bg-white rounded-xl border border-slate-200 p-6">
         <div className="flex items-center justify-between mb-4">
           <div className="flex items-center gap-3">
@@ -139,14 +142,23 @@ export function SettingsTab({
               </select>
             )}
           </div>
-          {!editing && (
+          <div className="flex items-center gap-2">
             <button
-              onClick={startEditing}
-              className="px-3 py-1.5 text-xs font-medium bg-sky-50 text-sky-700 border border-sky-200 rounded-lg hover:bg-sky-100 cursor-pointer transition-all"
+              type="button"
+              onClick={() => setShowWizard(true)}
+              className="px-3 py-1.5 text-xs font-medium bg-emerald-50 text-emerald-700 border border-emerald-200 rounded-lg hover:bg-emerald-100 cursor-pointer transition-all"
             >
-              Edit
+              New Wizard
             </button>
-          )}
+            {!editing && (
+              <button
+                onClick={startEditing}
+                className="px-3 py-1.5 text-xs font-medium bg-sky-50 text-sky-700 border border-sky-200 rounded-lg hover:bg-sky-100 cursor-pointer transition-all"
+              >
+                Edit
+              </button>
+            )}
+          </div>
         </div>
         <div className="grid grid-cols-2 gap-4">
           <div>

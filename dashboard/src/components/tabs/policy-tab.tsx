@@ -17,12 +17,13 @@ const FIELDS: Array<[keyof SpendingPolicyInput, string]> = [
   ["billMonthlyBudget", "Bill Monthly Budget ($)"],
   ["approvalThreshold", "Caregiver Approval Threshold ($)"],
   ["holdTimeSeconds", "Hold Time Before Auto-Approval (seconds)"],
+  ["severityThreshold", "Drug Interaction Severity Threshold"],
 ];
 
 /** Per-field HTML input constraints — kept in sync with schemas.ts (#211). */
 const FIELD_CONFIG: Record<
   keyof SpendingPolicyInput,
-  { min: number; max: number; step: number }
+  { min?: number; max?: number; step?: number }
 > = {
   dailyLimit:              { min: 1, max: 50000, step: 1 },
   monthlyLimit:            { min: 1, max: 50000, step: 1 },
@@ -30,6 +31,7 @@ const FIELD_CONFIG: Record<
   billMonthlyBudget:       { min: 1, max: 50000, step: 1 },
   approvalThreshold:       { min: 1, max: 50000, step: 1 },
   holdTimeSeconds:         { min: 0, max: 86400, step: 1 },
+  severityThreshold:       {},
 };
 
 /**
@@ -178,28 +180,45 @@ export function PolicyTab({
               >
                 {label}
               </label>
-              <input
-                id={inputId}
-                type="number"
-                inputMode="decimal"
-                min={FIELD_CONFIG[key].min}
-                max={FIELD_CONFIG[key].max}
-                step={FIELD_CONFIG[key].step}
-                value={Number.isFinite(policyForm[key]) ? policyForm[key] : ""}
-                aria-invalid={Boolean(errMsg)}
-                aria-describedby={errMsg || warnMsg ? errorId : undefined}
-                onChange={(e) => {
-                  setPolicyDirty(true);
-                  const raw = e.target.value;
-                  const parsed = raw === "" ? Number.NaN : Number(raw);
-                  setPolicyForm((p) => ({ ...p, [key]: parsed }));
-                }}
-                className={`w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 ${
-                  errMsg
-                    ? "border-red-400 focus:ring-red-500"
-                    : "border-slate-300 focus:ring-sky-500"
-                }`}
-              />
+              {key === "severityThreshold" ? (
+                <select
+                  id={inputId}
+                  value={String(policyForm[key] ?? "any")}
+                  onChange={(e) => {
+                    setPolicyDirty(true);
+                    setPolicyForm((p) => ({ ...p, [key]: e.target.value }));
+                  }}
+                  className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-sky-500"
+                >
+                  <option value="any">Any interaction (default conservative block)</option>
+                  <option value="major">Block only on major/severe interactions</option>
+                  <option value="moderate">Block on moderate or worse</option>
+                  <option value="mild">Block on mild or worse</option>
+                </select>
+              ) : (
+                <input
+                  id={inputId}
+                  type="number"
+                  inputMode="decimal"
+                  min={FIELD_CONFIG[key].min}
+                  max={FIELD_CONFIG[key].max}
+                  step={FIELD_CONFIG[key].step}
+                  value={Number.isFinite(policyForm[key]) ? policyForm[key] : ""}
+                  aria-invalid={Boolean(errMsg)}
+                  aria-describedby={errMsg || warnMsg ? errorId : undefined}
+                  onChange={(e) => {
+                    setPolicyDirty(true);
+                    const raw = e.target.value;
+                    const parsed = raw === "" ? Number.NaN : Number(raw);
+                    setPolicyForm((p) => ({ ...p, [key]: parsed }));
+                  }}
+                  className={`w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 ${
+                    errMsg
+                      ? "border-red-400 focus:ring-red-500"
+                      : "border-slate-300 focus:ring-sky-500"
+                  }`}
+                />
+              )}
               {errMsg && (
                 <p id={errorId} className="mt-1 text-xs text-red-600">
                   {errMsg}

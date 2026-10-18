@@ -59,6 +59,17 @@ export interface BillAuditResult {
   recommendation: string;
 }
 
+export type SeverityThreshold = 'any' | 'major' | 'moderate' | 'mild';
+
+export interface SideEffectEntry {
+  id: string;
+  recipientId: string;
+  medicationId: string;
+  description: string;
+  severity: 'mild' | 'moderate' | 'severe';
+  timestamp: string;
+}
+
 export interface SpendingPolicy {
   dailyLimit: number;
   monthlyLimit: number;
@@ -66,6 +77,7 @@ export interface SpendingPolicy {
   billMonthlyBudget: number;
   approvalThreshold: number; // require caregiver approval above this amount
   holdTimeSeconds: number; // time before pending approvals auto-approve
+  severityThreshold?: SeverityThreshold;
   /**
    * IANA timezone string for the caregiver's local day (Issue #207).
    * Example: "America/Phoenix", "America/New_York", "Europe/London".

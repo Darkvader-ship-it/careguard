@@ -179,7 +179,7 @@ export function downloadBillAuditPDF(
 }
 
 export function downloadMedicationPDF(
-  params: { priceResults: PharmacyCompareResult[]; interactionResult?: DrugInteractionResult },
+  params: { priceResults: PharmacyCompareResult[]; interactionResult?: DrugInteractionResult; sideEffectEntries?: Array<{ medicationId: string; description: string; severity: string; timestamp: string }> },
   options?: { theme?: PdfTheme; recipient?: RecipientProfile }
 ) {
   const theme = options?.theme ?? DEFAULT_PDF_THEME;
@@ -259,6 +259,29 @@ export function downloadMedicationPDF(
       headStyles: { fillColor: [245, 158, 11], fontSize: 7 },
       bodyStyles: { fontSize: 7 },
       columnStyles: { 3: { cellWidth: 70 } },
+    });
+    y = doc.lastAutoTable?.finalY ? doc.lastAutoTable.finalY + 8 : y + 30;
+  }
+
+  if ((params.sideEffectEntries?.length ?? 0) > 0) {
+    if (y > 240) { doc.addPage(); y = 20; }
+    doc.setFontSize(11);
+    doc.setTextColor(15, 23, 42);
+    doc.text("Side Effect Journal", 14, y);
+    y += 4;
+
+    autoTable(doc, {
+      startY: y,
+      head: [["Medication", "Severity", "Observed", "Date"]],
+      body: params.sideEffectEntries!.map((entry) => [
+        entry.medicationId,
+        entry.severity,
+        entry.description.slice(0, 60),
+        new Date(entry.timestamp).toLocaleDateString(),
+      ]),
+      headStyles: { fillColor: [14, 116, 144], fontSize: 7 },
+      bodyStyles: { fontSize: 7 },
+      columnStyles: { 2: { cellWidth: 70 } },
     });
   }
 

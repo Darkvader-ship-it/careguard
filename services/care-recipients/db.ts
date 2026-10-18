@@ -16,6 +16,15 @@ export interface CareRecipient {
   caregiver_user_id: string | null;
 }
 
+export interface SideEffectEntry {
+  id: string;
+  recipient_id: string;
+  medication_id: string;
+  description: string;
+  severity: 'mild' | 'moderate' | 'severe';
+  timestamp: string;
+}
+
 interface CareRecipientRow {
   id: string;
   name: string;
@@ -80,6 +89,17 @@ export class CareRecipientsStore {
         caregiver_user_id TEXT
       );
     `);
+
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS side_effect_entries (
+        id TEXT PRIMARY KEY,
+        recipient_id TEXT NOT NULL,
+        medication_id TEXT NOT NULL,
+        description TEXT NOT NULL,
+        severity TEXT NOT NULL CHECK (severity IN ('mild', 'moderate', 'severe')),
+        timestamp TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
   }
 
   private seedIfEmpty(): void {
@@ -132,6 +152,23 @@ export class CareRecipientsStore {
       input.caregiver_user_id ?? null,
     );
     return this.getById(id)!;
+  }
+
+  listSideEffectEntries(recipientId: string, medicationId?: string): SideEffectEntry[] {
+    const sql = medicationId
+      ? 'SELECT * FROM side_effect_entries WHERE recipient_id = ? AND medication_id = ? ORDER BY timestamp DESC'
+      : 'SELECT * FROM side_effect_entries WHERE recipient_id = ? ORDER BY timestamp DESC';
+    const params = medicationId ? [recipientId, medicationId] : [recipientId];
+    return this.db.prepare(sql).all(...params) as SideEffectEntry[];
+  }
+
+  addSideEffectEntry(entry: Omit<SideEffectEntry, 'id'>): SideEffectEntry {
+    const id = `${entry.recipient_id}-${entry.medication_id}-${Date.now()}`;
+    this.db.prepare(`
+      INSERT INTO side_effect_entries (id, recipient_id, medication_id, description, severity, timestamp)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).run(id, entry.recipient_id, entry.medication_id, entry.description, entry.severity, entry.timestamp);
+    return { id, ...entry };
   }
 }
 

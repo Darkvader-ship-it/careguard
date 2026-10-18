@@ -7,6 +7,7 @@ export const SpendingPolicyInput = z.object({
   billMonthlyBudget: z.number(),
   approvalThreshold: z.number(),
   holdTimeSeconds: z.number(),
+  severityThreshold: z.enum(['any', 'major', 'moderate', 'mild']).default('any'),
 });
 
 export type SpendingPolicyInput = z.infer<typeof SpendingPolicyInput>;
@@ -29,6 +30,7 @@ const FIELD_LABEL: Record<keyof SpendingPolicyInput, string> = {
   billMonthlyBudget: 'Bill budget',
   approvalThreshold: 'Approval threshold',
   holdTimeSeconds: 'Hold time before auto-approval (seconds)',
+  severityThreshold: 'Drug interaction severity threshold',
 };
 
 export function validatePolicy(input: unknown): PolicyValidation {
@@ -58,7 +60,7 @@ export function validatePolicy(input: unknown): PolicyValidation {
     'approvalThreshold',
   ];
   // holdTimeSeconds may be 0 (no hold), money fields must be ≥ 1 (#211)
-  const allFields: (keyof SpendingPolicyInput)[] = [...moneyFields, 'holdTimeSeconds'];
+  const allFields: (keyof SpendingPolicyInput)[] = [...moneyFields, 'holdTimeSeconds', 'severityThreshold'];
 
   for (const f of allFields) {
     if (!Number.isFinite(v[f])) {
