@@ -33,7 +33,6 @@ import { applySecurityMiddleware } from "./shared/security-middleware.ts";
 import { createApiDocsRouter } from "./shared/api-docs.ts";
 import { logger } from "./shared/logger.ts";
 import { requireApiKey } from "./shared/auth.ts";
-import { createPharmacyAdminAuth } from "./shared/pharmacy-admin-auth.ts";
 import {
   validateTask,
   getSuspiciousTaskCount,
@@ -79,6 +78,12 @@ import {
 } from "./shared/agent-state.ts";
 import { checkWalletBalance, formatResult, fetchWalletBalances } from "./shared/wallet-balance.ts";
 import { appendAuditEntry, auditRouter } from "./shared/audit-log.ts";
+import { pushTokenRouter } from "./shared/push-tokens.ts";
+import {
+  orderStatusRouter,
+  pharmacyWebhookRouter,
+} from "./shared/order-status.ts";
+import { startOrderStatusReminderCron } from "./shared/order-status-reminder.ts";
 import {
   rateLimiters,
   perRouteLimiters,
@@ -300,6 +305,9 @@ app.use((req, res, next) =>
 app.use(requestLifecycleMiddleware());
 app.use("/agent", requireApiKey);
 app.use("/agent/audit", auditRouter);
+app.use("/agent/push-tokens", pushTokenRouter);
+app.use("/agent/transactions/:txId/order-status", orderStatusRouter);
+app.use("/agent/order-status-webhook", pharmacyWebhookRouter);
 
 // --- Prometheus metrics ---
 app.get("/metrics", metricsHandler());
@@ -1125,20 +1133,16 @@ app.post(
       "agent task received",
     );
     try {
-      const result = await agentQueue.enqueue(
-        () =>
-          runAgent({
-            task,
-            profile: _profileData,
-            llm,
-            model: LLM_MODEL,
-            maxIterations: MAX_AGENT_ITERATIONS,
-            maxToolCallsPerRun: MAX_TOOL_CALLS_PER_RUN,
-            piiScrub: _piiScrub,
-          }),
-        (queueWaitMs) => {
-          res.setHeader("Server-Timing", `agent-queue;dur=${queueWaitMs.toFixed(2)}`);
-        },
+      const result = await agentQueue.enqueue(() =>
+        runAgent({
+          task,
+          profile: _profileData,
+          llm,
+          model: LLM_MODEL,
+          maxIterations: MAX_AGENT_ITERATIONS,
+          maxToolCallsPerRun: MAX_TOOL_CALLS_PER_RUN,
+          piiScrub: _piiScrub,
+        }),
       );
       agentRunsTotal.inc({ status: "success" });
       logger.info(
@@ -1159,75 +1163,6 @@ app.post(
     }
   },
 );
-
-// --- Allergies endpoints (#1230) ---
-app.get("/agent/allergies", (req, res) => {
-  const recipientId = (req.query.recipient_id as string) || (req.query.recipientId as string) || "rosa";
-  res.json({ allergies: loadRecipientAllergies(recipientId), recipientId });
-});
-
-app.post("/agent/allergies", (req, res) => {
-  const recipientId = (req.query.recipient_id as string) || (req.body.recipientId as string) || "rosa";
-  const { substance, severity, reaction, notes } = req.body ?? {};
-  if (!substance || !severity) {
-    return res.status(400).json({ error: "substance and severity are required" });
-  }
-  const created = addRecipientAllergy({ substance, severity, reaction, notes }, recipientId);
-  res.status(201).json(created);
-});
-
-app.delete("/agent/allergies/:id", (req, res) => {
-  const recipientId = (req.query.recipient_id as string) || "rosa";
-  const success = removeRecipientAllergy(req.params.id, recipientId);
-  res.json({ success });
-});
-
-// --- Co-Caregiver Presence endpoints (#1231) ---
-app.get("/agent/presence", (req, res) => {
-  const recipientId = (req.query.recipient_id as string) || (req.query.recipientId as string) || "rosa";
-  res.json({ presence: loadPresenceMap(recipientId), recipientId });
-});
-
-app.post("/agent/presence/view", (req, res) => {
-  const { itemId, itemType, caregiverId, caregiverName, avatar, recipientId } = req.body ?? {};
-  if (!itemId || !itemType || !caregiverId || !caregiverName) {
-    return res.status(400).json({ error: "itemId, itemType, caregiverId, and caregiverName are required" });
-  }
-  const entry = recordItemView({
-    itemId,
-    itemType,
-    caregiverId,
-    caregiverName,
-    avatar,
-    recipientId,
-  });
-  res.json({ success: true, entry });
-});
-
-// --- Bill OCR endpoint (#1229) ---
-app.post("/bill/ocr", async (req, res) => {
-  const { image } = req.body ?? {};
-  if (!image || typeof image !== "string") {
-    return res.status(400).json({ error: "image (base64) is required" });
-  }
-  try {
-    const result = await extractLineItemsFromBillImage(image);
-    res.json(result);
-  } catch (err: any) {
-    res.status(500).json({ error: err?.message || "OCR extraction failed" });
-  }
-});
-
-// --- Price watch endpoint (#1236) ---
-app.post("/agent/price-watch/run", async (req, res) => {
-  const recipientId = (req.query.recipient_id as string) || "rosa";
-  try {
-    const result = await runPriceWatchForRecipient(recipientId);
-    res.json(result);
-  } catch (err: any) {
-    res.status(500).json({ error: err?.message || "Price watch failed" });
-  }
-});
 
 // ============================================================
 // START
@@ -1375,7 +1310,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
       "CareGuard Unified Server started",
     );
     await startWalletBalanceScheduler();
-    await startPriceWatchScheduler();
+    startOrderStatusReminderCron();
   });
 
   gracefulShutdown({

@@ -6,6 +6,7 @@
  */
 
 import { logger } from "./logger.ts";
+import { getPushTokens } from "./push-tokens.ts";
 
 export type NotificationLevel = "info" | "warning" | "critical";
 export type NotificationChannel = "email" | "sms" | "slack";
@@ -27,6 +28,10 @@ export interface Notification {
   channel?: NotificationChannel | "all";
   recipientEmail?: string;
   recipientPhone?: string;
+  /** Caregiver ID used to look up registered push tokens. */
+  recipientCaregiverId?: string;
+  /** Explicit push token — overrides the caregiver-token lookup. */
+  recipientPushToken?: string;
 }
 
 const SLACK_WEBHOOK_URL = process.env.SLACK_WEBHOOK_URL;
@@ -35,7 +40,10 @@ const POSTMARK_API_KEY = process.env.POSTMARK_API_KEY;
 const TWILIO_ACCOUNT_SID = process.env.TWILIO_ACCOUNT_SID;
 const TWILIO_AUTH_TOKEN = process.env.TWILIO_AUTH_TOKEN;
 const TWILIO_FROM_NUMBER = process.env.TWILIO_FROM_NUMBER;
-const NOTIFICATION_EMAIL_FROM = process.env.NOTIFICATION_EMAIL_FROM || "notifications@careguard.ai";
+const NOTIFICATION_EMAIL_FROM =
+  process.env.NOTIFICATION_EMAIL_FROM || "notifications@careguard.ai";
+
+const PUSH_WEBHOOK_URL = process.env.PUSH_WEBHOOK_URL;
 
 const ICONS: Record<NotificationLevel, string> = {
   info: "",
@@ -47,6 +55,7 @@ export interface NotificationOptIn {
   email: boolean;
   sms: boolean;
   slack: boolean;
+  push: boolean;
 }
 
 export type NotificationPreferenceMap = Record<
@@ -58,6 +67,7 @@ export const DEFAULT_NOTIFICATION_OPT_IN: NotificationOptIn = {
   email: true,
   sms: false,
   slack: true,
+  push: false,
 };
 
 export const DEFAULT_NOTIFICATION_PREFERENCES: NotificationPreferenceMap = {
@@ -89,16 +99,23 @@ export function shouldSendNotification(
 
 function sendSlack(n: Notification): Promise<void> {
   if (!SLACK_WEBHOOK_URL) return Promise.resolve();
-  const ctx = n.context ? `\n\n\`\`\`${JSON.stringify(n.context, null, 2)}\`\`\`` : "";
+  const ctx = n.context
+    ? `\n\n\`\`\`${JSON.stringify(n.context, null, 2)}\`\`\``
+    : "";
   return fetch(SLACK_WEBHOOK_URL, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       text: `${ICONS[n.level]} *${n.title}*\n${n.description}${ctx}`,
     }),
-  }).then(() => {}).catch((err: any) => {
-    logger.warn({ err: err?.message ?? err }, "failed to deliver Slack webhook");
-  });
+  })
+    .then(() => {})
+    .catch((err: any) => {
+      logger.warn(
+        { err: err?.message ?? err },
+        "failed to deliver Slack webhook",
+      );
+    });
 }
 
 async function sendEmail(n: Notification): Promise<void> {
@@ -110,7 +127,7 @@ async function sendEmail(n: Notification): Promise<void> {
       await fetch("https://api.resend.com/emails", {
         method: "POST",
         headers: {
-          "Authorization": `Bearer ${RESEND_API_KEY}`,
+          Authorization: `Bearer ${RESEND_API_KEY}`,
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
@@ -121,7 +138,10 @@ async function sendEmail(n: Notification): Promise<void> {
         }),
       });
     } catch (err: any) {
-      logger.warn({ err: err?.message ?? err }, "failed to send email via Resend");
+      logger.warn(
+        { err: err?.message ?? err },
+        "failed to send email via Resend",
+      );
     }
     return;
   }
@@ -133,7 +153,7 @@ async function sendEmail(n: Notification): Promise<void> {
         headers: {
           "X-Postmark-Server-Token": POSTMARK_API_KEY,
           "Content-Type": "application/json",
-          "Accept": "application/json",
+          Accept: "application/json",
         },
         body: JSON.stringify({
           From: NOTIFICATION_EMAIL_FROM,
@@ -143,14 +163,18 @@ async function sendEmail(n: Notification): Promise<void> {
         }),
       });
     } catch (err: any) {
-      logger.warn({ err: err?.message ?? err }, "failed to send email via Postmark");
+      logger.warn(
+        { err: err?.message ?? err },
+        "failed to send email via Postmark",
+      );
     }
   }
 }
 
 async function sendSms(n: Notification): Promise<void> {
   const to = n.recipientPhone;
-  if (!to || !TWILIO_ACCOUNT_SID || !TWILIO_AUTH_TOKEN || !TWILIO_FROM_NUMBER) return;
+  if (!to || !TWILIO_ACCOUNT_SID || !TWILIO_AUTH_TOKEN || !TWILIO_FROM_NUMBER)
+    return;
 
   try {
     const twilioUrl = `https://api.twilio.com/2010-04-01/Accounts/${TWILIO_ACCOUNT_SID}/Messages.json`;
@@ -159,11 +183,13 @@ async function sendSms(n: Notification): Promise<void> {
       From: TWILIO_FROM_NUMBER,
       Body: `[CareGuard] ${n.title}: ${n.description}`,
     });
-    const auth = Buffer.from(`${TWILIO_ACCOUNT_SID}:${TWILIO_AUTH_TOKEN}`).toString("base64");
+    const auth = Buffer.from(
+      `${TWILIO_ACCOUNT_SID}:${TWILIO_AUTH_TOKEN}`,
+    ).toString("base64");
     await fetch(twilioUrl, {
       method: "POST",
       headers: {
-        "Authorization": `Basic ${auth}`,
+        Authorization: `Basic ${auth}`,
         "Content-Type": "application/x-www-form-urlencoded",
       },
       body: body.toString(),
@@ -203,5 +229,10 @@ export async function notify(
     if (nextChannel === "sms") {
       await sendSms(n);
     }
+  }
+  // Push is dispatched independently — a failure here does not block the
+  // other channels, which act as the fallback.
+  if (channel === "push" || channel === "all") {
+    await sendPush(n);
   }
 }

@@ -7,9 +7,8 @@ import {
   DrugInteractionResultSchema,
   PharmacyCompareResultSchema,
   type RecipientProfile,
-  type Vital,
-  type RecipientAllergy,
-  type AllergySeverity,
+  type Transaction,
+  ORDER_STATUS,
 } from "../../lib/types";
 import type { AgentResult } from "../types";
 import { VitalsSection } from "../vitals-section";
@@ -23,12 +22,26 @@ const DEFAULT_MEDS = ["Lisinopril", "Metformin", "Atorvastatin", "Amlodipine"] a
 export interface MedicationsTabProps {
   agentResult: AgentResult | null;
   recipient: RecipientProfile;
-  locale?: Locale;
+  /** All medication transactions — used to show order lifecycle status. */
+  allTransactions?: Transaction[];
 }
 
-export function MedicationsTab({ agentResult, recipient, locale = "en" }: MedicationsTabProps) {
-  const t = getTranslations(locale).medications;
-  const [vitals, setVitals] = useState<Vital[]>([]);
+export function MedicationsTab({
+  agentResult,
+  recipient,
+  allTransactions = [],
+}: MedicationsTabProps) {
+  // Find the most recent medication order for each drug name
+  const latestOrderByDrug = allTransactions
+    .filter((tx) => tx.type === "medication" && tx.order_status)
+    .reduce<Record<string, Transaction>>((acc, tx) => {
+      const key = tx.description.split(" from ")[0].toLowerCase();
+      if (!acc[key] || new Date(tx.timestamp) > new Date(acc[key].timestamp)) {
+        acc[key] = tx;
+      }
+      return acc;
+    }, {});
+
   const hasPriceResults = agentResult?.toolCalls.some(
     (tc) => tc.tool === "compare_pharmacy_prices",
   );
@@ -245,21 +258,31 @@ export function MedicationsTab({ agentResult, recipient, locale = "en" }: Medica
                 className="flex items-center justify-between p-4 bg-slate-50 rounded-lg border border-slate-100"
               >
                 <div>
-                  <div className="flex items-center gap-2">
-                    <span className="font-medium text-sm text-slate-800">{drug}</span>
-                    <button
-                      onClick={() => toggleOptOut(drug)}
-                      title={isOptedOut ? "Click to enable price alerts" : "Click to opt out of price alerts"}
-                      className={`text-[10px] px-2 py-0.5 rounded-full border transition-all cursor-pointer ${
-                        isOptedOut
-                          ? "bg-slate-100 text-slate-500 border-slate-200"
-                          : "bg-emerald-50 text-emerald-700 border-emerald-200"
-                      }`}
-                    >
-                      {isOptedOut ? "🔕 Price Watch Off" : "🔔 Price Watch Active"}
-                    </button>
+                  <div className="font-medium text-sm flex items-center gap-2">
+                    {drug}
+                    {latestOrderByDrug[drug.toLowerCase()]?.order_status && (
+                      <span
+                        className={`px-2 py-0.5 rounded text-xs font-medium ${
+                          latestOrderByDrug[drug.toLowerCase()].order_status ===
+                          "picked_up"
+                            ? "bg-green-100 text-green-700"
+                            : latestOrderByDrug[drug.toLowerCase()]
+                                  .order_status === "ready"
+                              ? "bg-amber-100 text-amber-700"
+                              : "bg-slate-100 text-slate-500"
+                        }`}
+                      >
+                        {latestOrderByDrug[drug.toLowerCase()].order_status ===
+                        "picked_up"
+                          ? "✓ Picked up"
+                          : latestOrderByDrug[drug.toLowerCase()]
+                                .order_status === "ready"
+                            ? "⏳ Ready for pickup"
+                            : "📦 Submitted"}
+                      </span>
+                    )}
                   </div>
-                  <div className={r ? "text-xs text-slate-500 mt-1" : "text-xs text-slate-400 italic mt-1"}>
+                  <div className="text-xs text-slate-500">
                     {r
                       ? `${t.best}: ${r.cheapest.pharmacyName} at $${r.cheapest.price}`
                       : t.notYetCompared}
