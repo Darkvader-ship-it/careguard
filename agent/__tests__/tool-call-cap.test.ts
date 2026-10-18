@@ -8,7 +8,10 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import request from "supertest";
 
 vi.mock("dotenv/config", () => ({}));
-vi.mock("../../shared/audit-log.ts", () => ({ appendAuditEntry: vi.fn() }));
+vi.mock("../../shared/audit-log.ts", () => ({
+  appendAuditEntry: vi.fn(),
+  auditRouter: () => (req: any, res: any, next: any) => next(),
+}));
 vi.mock("../../shared/cors.ts", () => ({
   createCorsMiddleware: () => (_req: any, _res: any, next: any) => next(),
 }));
@@ -76,7 +79,7 @@ process.env.MAX_TOOL_CALLS_PER_RUN = "5";
 process.env.CAREGIVER_TOKEN = "test-caregiver-token";
 
 const { app } = await import("../../server.ts");
-const auth = (req: any) => req.set("Authorization", "Bearer test-caregiver-token");
+const auth = (req: any) => req.set("Authorization", "Bearer test-agent-api-key");
 
 describe("tool call cap", () => {
   beforeEach(() => {
@@ -111,6 +114,7 @@ describe("tool call cap", () => {
     expect(res.status).toBe(200);
     expect(res.body.truncated).toBe(true);
     expect(res.body.toolCalls.length).toBe(3);
+    expect(res.body.events).toContainEqual({ kind: "tool_call_cap_reached" });
   });
 
   it("does not truncate when under cap", async () => {

@@ -4,16 +4,17 @@ import {
   optionalFreeTextSchema,
   zipCodeSchema,
 } from "../../shared/free-text.ts";
-import {
-  type PharmacyPriceRecord,
-  toDisplayName,
-} from "./db.ts";
+import { DEFAULT_ZIP_CODE } from "../../shared/pharmacy-pricing.ts";
+import { toDisplayName } from "./db.ts";
 
 export const PharmacyCompareQuerySchema = z
   .object({
     drug: freeTextSchema("drug"),
     dosage: optionalFreeTextSchema("dosage"),
-    zip: zipCodeSchema.optional().default("90210"),
+    zip: zipCodeSchema.optional().default(DEFAULT_ZIP_CODE),
+    recipient: optionalFreeTextSchema("recipient"),
+    recipient_id: optionalFreeTextSchema("recipient_id"),
+    recipientId: optionalFreeTextSchema("recipientId"),
   })
   .strict();
 export type PharmacyCompareQuery = z.infer<typeof PharmacyCompareQuerySchema>;
@@ -51,36 +52,89 @@ export const PharmacyPriceSchema = z
   .strict();
 export type PharmacyPriceInput = z.infer<typeof PharmacyPriceSchema>;
 
+export const PharmacyPriceItemSchema = z.object({
+  pharmacyName: z.string(),
+  pharmacyId: z.string(),
+  price: z.number().positive(),
+  distance: z.number().nonnegative(),
+  inStock: z.boolean(),
+});
+
+export const PharmacyCompareResponseSchema = z.object({
+  drug: z.string(),
+  dosage: z.string(),
+  zipCode: z.string(),
+  usedZipCode: z.string(),
+  isFallbackZip: z.boolean(),
+  queryTimestamp: z.string(),
+  protocol: z.object({
+    name: z.string(),
+    network: z.string(),
+    price: z.string(),
+    payTo: z.string(),
+  }),
+  prices: z.array(PharmacyPriceItemSchema),
+  cheapest: z.object({
+    pharmacyName: z.string(),
+    pharmacyId: z.string(),
+    price: z.number().positive(),
+    distance: z.number().nonnegative(),
+  }),
+  mostExpensive: z.object({
+    pharmacyName: z.string(),
+    pharmacyId: z.string(),
+    price: z.number().positive(),
+    distance: z.number().nonnegative(),
+  }),
+  potentialSavings: z.number().nonnegative(),
+  savingsPercent: z.number().nonnegative(),
+});
+export type PharmacyCompareResponse = z.infer<typeof PharmacyCompareResponseSchema>;
+
 export function buildCompareResponse(options: {
   drug: string;
   dosage: string;
   zip: string;
+  usedZipCode?: string;
+  isFallbackZip?: boolean;
   payTo: string;
   network: string;
-  prices: PharmacyPriceRecord[];
+  prices: any[];
   protocolPrice?: string;
-}) {
+}): PharmacyCompareResponse {
   if (!options.prices || options.prices.length === 0) {
     return { ok: false, reason: "NO_PRICES_FOUND" } as any;
   }
-  const zipVariance = parseInt(options.zip.slice(-2), 10) % 10;
-  const adjustedPrices = options.prices.map((price, index) => ({
-    ...price,
-    adjustedDistanceMiles:
-      price.distanceMiles + zipVariance * 0.5 + index * 0.3,
-  }));
 
-  const sorted = [...adjustedPrices].sort((left, right) => left.price - right.price);
+  const usedZipCode = options.usedZipCode ?? options.zip;
+  const isFallbackZip = options.isFallbackZip ?? (usedZipCode !== options.zip);
+
+  const formattedPrices = options.prices.map((p) => {
+    const distNum = typeof p.distanceMiles === "number"
+      ? p.distanceMiles
+      : typeof p.distance === "number"
+        ? p.distance
+        : parseFloat(String(p.distance || "0").replace(" mi", "")) || 0;
+
+    return {
+      pharmacyName: p.pharmacy || p.pharmacyName,
+      pharmacyId: p.pharmacyId || p.id,
+      price: Number(p.price),
+      distance: +distNum.toFixed(1),
+      inStock: true,
+    };
+  });
+
+  const sorted = [...formattedPrices].sort((a, b) => a.price - b.price);
   const cheapest = sorted[0];
   const mostExpensive = sorted[sorted.length - 1];
 
-  return {
-    drug:
-      sorted[0]?.displayName ||
-      toDisplayName(options.drug.trim().toLowerCase()),
+  const response = {
+    drug: options.prices[0]?.displayName || toDisplayName(options.drug.trim().toLowerCase()),
     dosage: options.dosage,
     zipCode: options.zip,
-    usedZipCode: true,
+    usedZipCode,
+    isFallbackZip,
     queryTimestamp: new Date().toISOString(),
     protocol: {
       name: "x402",
@@ -88,29 +142,22 @@ export function buildCompareResponse(options: {
       price: options.protocolPrice ?? "$0.002",
       payTo: options.payTo,
     },
-    prices: sorted.map((price) => ({
-      pharmacyName: price.pharmacy,
-      pharmacyId: price.pharmacyId,
-      price: price.price,
-      distance: +price.adjustedDistanceMiles.toFixed(1),
-      inStock: true,
-    })),
+    prices: sorted,
     cheapest: {
-      pharmacyName: cheapest.pharmacy,
+      pharmacyName: cheapest.pharmacyName,
       pharmacyId: cheapest.pharmacyId,
       price: cheapest.price,
-      distance: +cheapest.adjustedDistanceMiles.toFixed(1),
+      distance: cheapest.distance,
     },
     mostExpensive: {
-      pharmacyName: mostExpensive.pharmacy,
+      pharmacyName: mostExpensive.pharmacyName,
       pharmacyId: mostExpensive.pharmacyId,
       price: mostExpensive.price,
-      distance: +mostExpensive.adjustedDistanceMiles.toFixed(1),
+      distance: mostExpensive.distance,
     },
     potentialSavings: +(mostExpensive.price - cheapest.price).toFixed(2),
-    savingsPercent: +(
-      (1 - cheapest.price / mostExpensive.price) *
-      100
-    ).toFixed(1),
+    savingsPercent: +( (1 - cheapest.price / mostExpensive.price) * 100 ).toFixed(1),
   };
+
+  return PharmacyCompareResponseSchema.parse(response);
 }

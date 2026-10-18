@@ -2,62 +2,33 @@
 
 /**
  * Drug Interaction Severity Convention
- * 
+ *
  * The following severity levels are used for drug interactions,
  * ordered by clinical risk:
  * - "severe" (0): Life-threatening or requires immediate intervention
  * - "moderate" (1): Significant interaction requiring monitoring/adjustment
  * - "mild" (2): Minor interaction with minimal clinical impact
- * 
+ *
  * When sorting interactions, severe > moderate > mild.
  * For interactions with equal severity, sort alphabetically by drug names.
  */
 
-export interface Medication {
-  name: string;
-  dosage: string;
-  frequency: string;
-  currentPharmacy?: string;
-  currentPrice?: number;
-  nextRefillDate?: string;
-}
+import { z } from 'zod';
 
-export interface PharmacyPrice {
-  pharmacyName: string;
-  pharmacyId: string;
-  price: number;
-  distance?: string;
-  inStock: boolean | 'unknown';
-}
+// ── Medication ────────────────────────────────────────────────────────────────
 
-export interface PriceComparisonResult {
-  drug: string;
-  dosage: string;
-  zipCode: string;
-  prices: PharmacyPrice[];
-  cheapest: PharmacyPrice;
-  mostExpensive: PharmacyPrice;
-  potentialSavings: number;
-}
+export const MedicationSchema = z.object({
+  name: z.string().min(1),
+  dosage: z.string().min(1),
+  frequency: z.string().min(1),
+  currentPharmacy: z.string().optional(),
+  currentPrice: z.number().nonnegative().optional(),
+  nextRefillDate: z.string().optional(),
+});
 
-export interface BillLineItem {
-  description: string;
-  cptCode?: string;
-  chargedAmount: number;
-  fairMarketRate?: number;
-  status: 'valid' | 'duplicate' | 'upcoded' | 'unbundled' | 'error';
-  errorDescription?: string;
-  suggestedAmount?: number;
-}
+export type Medication = z.infer<typeof MedicationSchema>;
 
-export interface BillAuditResult {
-  totalCharged: number;
-  totalCorrect: number;
-  totalOvercharge: number;
-  errorCount: number;
-  lineItems: BillLineItem[];
-  recommendation: string;
-}
+// ── PharmacyPrice ─────────────────────────────────────────────────────────────
 
 export type SeverityThreshold = 'any' | 'major' | 'moderate' | 'mild';
 
@@ -129,44 +100,55 @@ export function normalizeTransactionCategory(
     : TRANSACTION_CATEGORY.SERVICE_FEES;
 }
 
-export interface Transaction {
-  id: string;
-  timestamp: string;
-  type: 'medication' | 'bill' | 'service_fee';
-  description: string;
-  amount: number;
-  recipient: string;
+// ── Transaction ───────────────────────────────────────────────────────────────
+
+export const TransactionSchema = z.object({
+  id: z.string().min(1),
+  timestamp: z.string().min(1),
+  type: z.enum(['medication', 'bill', 'service_fee']),
+  description: z.string(),
+  amount: z.number().nonnegative(),
+  recipient: z.string(),
   // Always a real 64-char hex Stellar tx hash, or undefined. Never a raw/base64
   // payment receipt — the backend normalizes that before recording the transaction (#14).
-  stellarTxHash?: string;
+  stellarTxHash: z.string().regex(STELLAR_TX_HASH_RE).optional(),
   // 'extracted': hash was successfully parsed from the x402 PAYMENT-RESPONSE header.
   // 'extraction_failed': header was present but all parse strategies failed (#191).
-  txHashStatus?: 'extracted' | 'extraction_failed';
-  mppOrderId?: string;
-  status:
-    | 'pending'
-    | 'approved'
-    | 'completed'
-    | 'blocked'
-    | 'disputed'
-    | 'cancelled'
-    | 'rejected';
-  category: TransactionCategory;
-  pendingUntil?: string;
-  submittedAt?: string;
-}
+  txHashStatus: z.enum(['extracted', 'extraction_failed']).optional(),
+  mppOrderId: z.string().optional(),
+  status: z.enum([
+    'pending',
+    'approved',
+    'completed',
+    'blocked',
+    'disputed',
+    'cancelled',
+    'rejected',
+  ]),
+  category: z.enum(TRANSACTION_CATEGORIES),
+  pendingUntil: z.string().optional(),
+  submittedAt: z.string().optional(),
+});
 
-export interface AgentAction {
-  id: string;
-  timestamp: string;
-  action: string;
-  details: string;
-  cost: number; // agent service fee paid via x402
-  result: string;
-  transactions: Transaction[];
-}
+export type Transaction = z.infer<typeof TransactionSchema>;
 
-export interface CareRecipient {
+// ── AgentAction ───────────────────────────────────────────────────────────────
+
+export const AgentActionSchema = z.object({
+  id: z.string().min(1),
+  timestamp: z.string().min(1),
+  action: z.string(),
+  details: z.string(),
+  cost: z.number().nonnegative(),
+  result: z.string(),
+  transactions: z.array(TransactionSchema),
+});
+
+export type AgentAction = z.infer<typeof AgentActionSchema>;
+
+// ── CareRecipientProfile (Issue #1067) ────────────────────────────────────────
+
+export interface CareRecipientProfile {
   name: string;
   walletAddress: string;
   medications: Medication[];
@@ -180,18 +162,26 @@ export interface CareRecipient {
   savingsAchieved: number;
 }
 
-export interface Alert {
-  id: string;
-  timestamp: string;
-  type:
-    | 'approval_needed'
-    | 'error_found'
-    | 'refill_due'
-    | 'budget_warning'
-    | 'policy_blocked';
-  title: string;
-  description: string;
-  amount?: number;
-  actionRequired: boolean;
-  resolved: boolean;
-}
+/** Legacy type alias for CareRecipientProfile (Issue #1067) */
+export type CareRecipient = CareRecipientProfile;
+
+// ── Alert ─────────────────────────────────────────────────────────────────────
+
+export const AlertSchema = z.object({
+  id: z.string().min(1),
+  timestamp: z.string().min(1),
+  type: z.enum([
+    'approval_needed',
+    'error_found',
+    'refill_due',
+    'budget_warning',
+    'policy_blocked',
+  ]),
+  title: z.string(),
+  description: z.string(),
+  amount: z.number().nonnegative().optional(),
+  actionRequired: z.boolean(),
+  resolved: z.boolean(),
+});
+
+export type Alert = z.infer<typeof AlertSchema>;

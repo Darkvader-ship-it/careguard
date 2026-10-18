@@ -9,7 +9,8 @@
  */
 
 import "dotenv/config";
-import { existsSync, mkdirSync } from "fs";
+import { createHash } from "crypto";
+import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync } from "fs";
 import express, { type Express } from "express";
 import OpenAI from "openai";
 import { Keypair, Horizon } from "@stellar/stellar-sdk";
@@ -20,13 +21,13 @@ import { validateTask, getSuspiciousTaskCount } from "../shared/task-validation.
 import { appendAuditEntry, auditRouter } from "../shared/audit-log.ts";
 import { rateLimiters } from "../shared/rate-limit.ts";
 import { agentQueue } from "../shared/agent-queue.ts";
-import { requestContextMiddleware } from "../shared/request-context.ts";
-import { requestLoggerMiddleware } from "../shared/request-logger.ts";
+import { requestLifecycleMiddleware } from "../shared/request-lifecycle.ts";
+import { gracefulShutdown } from "../shared/graceful-shutdown.ts";
 import {
   metricsHandler,
   agentRunsTotal,
 } from "../shared/metrics.ts";
-import { redactPII, hashTask } from "../shared/redact.ts";
+import { redactPII, hashTask, registerKnownNames } from "../shared/redact.ts";
 import {
   getSpendingSummary,
   getWalletBalance,
@@ -39,20 +40,39 @@ import {
   confirmAdherenceReminder,
   setCurrentRecipient,
   SpendingPolicySchema,
+  previewSpendingPolicy,
+  getDataDir,
   payForMedication,
   payBill,
 } from "./tools.ts";
-import { getPendingAdherences } from "../shared/adherence.ts";
+import { getAdherenceTimeline, getPendingAdherences, skipAdherence } from "../shared/adherence.ts";
+import { createVitalsStore } from "../services/vitals/db.ts";
+import { createVitalsRouter } from "../services/vitals/routes.ts";
+import { createCareRecipientsStore } from "../services/care-recipients/db.ts";
+import { authorizeApprovalActor, createDelegationsRouter } from "../services/care-recipients/delegation.ts";
 import { notify } from "../shared/notifications.ts";
 import { resolveStellarNetwork, validateSignerKeyForNetwork } from "../shared/stellar-network.ts";
 import { verifyWebhook } from "../shared/verify-webhook.ts";
-import { executeTool, runAgent, buildSystemPrompt } from "./runner.ts";
+import { requireApiKey } from "../shared/auth.ts";
+import { fetchWalletBalances } from "../shared/wallet-balance.ts";
+import {
+  loadRecipientAllergies,
+  addRecipientAllergy,
+  removeRecipientAllergy,
+} from "../shared/allergies.ts";
+import { loadPresenceMap, recordItemView } from "../shared/presence.ts";
+import { extractLineItemsFromBillImage } from "../shared/bill-ocr.ts";
+import { runPriceWatchForRecipient } from "./price-watch.ts";
 
-const PORT = parseInt(process.env.AGENT_PORT || "3004");
+const PORT = parseInt(process.env.AGENT_PORT || "3004", 10);
 
 if (!process.env.LLM_API_KEY) throw new Error("LLM_API_KEY required in .env");
 if (!process.env.AGENT_SECRET_KEY) throw new Error("AGENT_SECRET_KEY required in .env");
 if (!process.env.CAREGIVER_TOKEN) throw new Error("CAREGIVER_TOKEN required in .env");
+
+if (process.env.NODE_ENV === "production" && !process.env.AGENT_API_KEY) {
+  throw new Error("AGENT_API_KEY required in production");
+}
 
 const CAREGIVER_TOKEN = process.env.CAREGIVER_TOKEN;
 
@@ -160,7 +180,7 @@ function broadcastSSE(event: string, data: unknown): void {
 // Express API
 const app: Express = express();
 
-app.use("/agent", requireCaregiverToken);
+app.use("/agent", requireApiKey);
 app.use("/agent/audit", auditRouter);
 app.use("/agent", rateLimiters.agent);
 app.use("/health", rateLimiters.health);
@@ -168,42 +188,51 @@ app.use(rateLimiters.default);
 
 applySecurityMiddleware(app);
 app.use(createCorsMiddleware());
-app.use(express.json({ limit: process.env.JSON_BODY_LIMIT ?? "64kb" }));
-app.use(requestContextMiddleware());
-app.use(requestLoggerMiddleware());
+app.use(express.json({ limit: process.env.JSON_BODY_LIMIT ?? "20kb" }));
+app.use(requestLifecycleMiddleware());
 app.get("/metrics", metricsHandler());
 
 // Per-run tool call cap
 const MAX_TOOL_CALLS_PER_RUN = parseInt(process.env.MAX_TOOL_CALLS_PER_RUN || "30", 10);
 let toolCallCapHitsTotal = 0;
 
-let agentPaused = false;
+// ── Persisted agent-pause state (Issue #17) ──────────────────────────────────
+// Persists to data/agent-state.json so a paused agent stays paused across
+// restarts.  Writes are atomic (tmp + rename) to avoid corrupt reads.
+const AGENT_STATE_FILE = () => `${getDataDir()}/agent-state.json`;
 
-// In-memory cache for wallet balances (5s TTL)
-interface WalletCacheEntry {
-  data: { usdc: string; xlm: string; address: string };
-  expiresAt: number;
+function loadAgentState(): { paused: boolean } {
+  try {
+    const file = AGENT_STATE_FILE();
+    if (!existsSync(file)) return { paused: false };
+    return JSON.parse(readFileSync(file, "utf-8"));
+  } catch {
+    return { paused: false };
+  }
 }
-const walletCache = new Map<string, WalletCacheEntry>();
-const WALLET_CACHE_TTL_MS = 5000;
+
+function saveAgentState(state: { paused: boolean }): void {
+  try {
+    const file = AGENT_STATE_FILE();
+    const tmp = `${file}.tmp-${Date.now()}`;
+    writeFileSync(tmp, JSON.stringify(state), "utf-8");
+    renameSync(tmp, file);
+  } catch (err) {
+    logger.warn({ err }, "[agent-state] Failed to persist agent state");
+  }
+}
+
+let agentPaused = loadAgentState().paused;
 
 app.get("/agent/wallet", async (req, res) => {
   const address = agentKeypair.publicKey();
-  const now = Date.now();
-  const cached = walletCache.get(address);
-  if (cached && cached.expiresAt > now) {
-    return res.json(cached.data);
-  }
   try {
-    const account = await horizonServer.loadAccount(address);
-    const usdc = account.balances.find((b: any) => b.asset_code === "USDC" && b.asset_issuer === process.env.USDC_ISSUER);
-    const xlm = account.balances.find((b: any) => b.asset_type === "native");
+    const balances = await fetchWalletBalances(address, STELLAR_CONFIG.horizonUrl, process.env.USDC_ISSUER || "");
     const data = {
-      usdc: usdc ? parseFloat((usdc as any).balance).toFixed(2) : "0.00",
-      xlm: xlm ? parseFloat((xlm as any).balance).toFixed(2) : "0.00",
+      usdc: balances.usdc.toFixed(2),
+      xlm: balances.xlm.toFixed(2),
       address,
     };
-    walletCache.set(address, { data, expiresAt: now + WALLET_CACHE_TTL_MS });
     res.json(data);
   } catch (err: any) {
     res.status(500).json({ error: `Failed to load wallet: ${err.message}` });
@@ -219,11 +248,38 @@ app.get("/agent/pending-approvals", (req, res) => {
   res.json({ approvals: pending, recipientId });
 });
 
-// Approve or reject a pending transaction
+// Temporary approval delegation (#1195). Same SQLite file as the unified server's store.
+const delegationStore = createCareRecipientsStore();
+app.use("/agent", createDelegationsRouter(delegationStore));
+
+// Approve or reject a pending transaction.
+// Optional body: caregiver_id (who is acting) and on_behalf_of (whose authority
+// they're using). Acting on_behalf_of someone requires an active delegation.
 app.post("/agent/approvals/:txId", async (req, res) => {
   const { txId } = req.params;
   const { approve } = req.body;
   const recipientId = (req.query.recipient_id as string) || (req.body.recipient_id as string) || "rosa";
+  const authz = authorizeApprovalActor(delegationStore, {
+    recipientId,
+    caregiverId: req.body?.caregiver_id,
+    onBehalfOf: req.body?.on_behalf_of,
+  });
+  if (!authz.ok) return res.status(authz.status).json({ error: authz.error });
+  const recordDecision = (status: string) =>
+    appendAuditEntry({
+      event: "approval_decision",
+      actor: authz.actor,
+      details: {
+        txId,
+        recipientId,
+        decision: approve ? "approve" : "deny",
+        status,
+        delegated: authz.delegated,
+        ...(authz.delegated
+          ? { onBehalfOf: authz.onBehalfOf, delegationId: authz.delegation.id, delegationEndsAt: authz.delegation.ends_at }
+          : {}),
+      },
+    });
   setCurrentRecipient(recipientId);
   const tracker = getSpendingTracker();
   const txIndex = tracker.transactions.findIndex((t: any) => t.id === txId);
@@ -234,7 +290,8 @@ app.post("/agent/approvals/:txId", async (req, res) => {
   if (!approve) {
     (tx as any).status = "rejected";
     saveSpending(tracker);
-    return res.json({ success: true, status: "rejected" });
+    recordDecision("rejected");
+    return res.json({ success: true, status: "rejected", delegated: authz.delegated });
   }
 
   try {
@@ -260,10 +317,12 @@ app.post("/agent/approvals/:txId", async (req, res) => {
       tx.stellarTxHash = result.transaction?.stellarTxHash;
       tracker.transactions[txIndex] = tx;
       saveSpending(tracker);
-      return res.json({ success: true, status: "completed", transaction: result.transaction });
+      recordDecision("completed");
+      return res.json({ success: true, status: "completed", transaction: result.transaction, delegated: authz.delegated });
     } else {
       (tx as any).status = "rejected";
       saveSpending(tracker);
+      recordDecision("payment_failed");
       return res.status(400).json({ success: false, error: result.error, status: "rejected" });
     }
   } catch (err: any) {
@@ -275,7 +334,7 @@ app.get("/", (_req, res) => {
   res.json({
     service: "CareGuard AI Agent",
     version: "1.0.0",
-    network: "stellar:testnet",
+    network: `stellar:${STELLAR_CONFIG.networkType}`,
     llm: `${LLM_BASE_URL} / ${LLM_MODEL}`,
     agentWallet: agentKeypair.publicKey(),
     recipients: ["rosa"],
@@ -287,6 +346,7 @@ app.get("/", (_req, res) => {
 app.get("/agent/status", (_req, res) => { res.json({ paused: agentPaused }); });
 app.post("/agent/pause", (_req, res) => {
   agentPaused = true;
+  saveAgentState({ paused: true });
   logger.info("agent paused by caregiver");
   notify({ level: "warning", title: "Agent Paused", description: "CareGuard agent has been paused by the caregiver. No payments or actions will be processed until resumed." });
   broadcastSSE("status", { paused: true });
@@ -294,6 +354,7 @@ app.post("/agent/pause", (_req, res) => {
 });
 app.post("/agent/resume", (_req, res) => {
   agentPaused = false;
+  saveAgentState({ paused: false });
   logger.info("agent resumed by caregiver");
   notify({ level: "info", title: "Agent Resumed", description: "CareGuard agent has been resumed and is now processing actions." });
   broadcastSSE("status", { paused: false });
@@ -344,24 +405,33 @@ app.post("/agent/run", async (req, res) => {
 
   const activeRecipient = recipientProfiles.rosa ?? Object.values(recipientProfiles)[0];
   try {
-    const result = await agentQueue.enqueue(() => runAgent({
-      task,
-      profile: {
-        recipient: activeRecipient,
-        caregiver: caregiverProfile,
+    const result = await agentQueue.enqueue(
+      () =>
+        runAgent({
+          task,
+          profile: {
+            recipient: activeRecipient,
+            caregiver: caregiverProfile,
+          },
+          llm,
+          model: LLM_MODEL,
+          maxIterations: MAX_ITERATIONS,
+          maxToolCallsPerRun: MAX_TOOL_CALLS_PER_RUN,
+          llmToolTemperature: LLM_TOOL_TEMPERATURE,
+          llmSummaryTemperature: LLM_SUMMARY_TEMPERATURE,
+          llmMaxTokensToolResult: LLM_MAX_TOKENS_TOOL_RESULT,
+          llmMaxTokensSimple: LLM_MAX_TOKENS_SIMPLE,
+          llmMaxTokensSummary: LLM_MAX_TOKENS_SUMMARY,
+          llmContextWindow: parseInt(process.env.LLM_CONTEXT_WINDOW || "32768", 10),
+          piiScrub: _piiScrub,
+          // #1253: surface the in-flight tool so the dashboard's loading state can
+          // show which step of a multi-tool-call task is running.
+          onProgress: (progress) => broadcastSSE("run_progress", progress),
+        }),
+      (queueWaitMs) => {
+        res.setHeader("Server-Timing", `agent-queue;dur=${queueWaitMs.toFixed(2)}`);
       },
-      llm,
-      model: LLM_MODEL,
-      maxIterations: MAX_ITERATIONS,
-      maxToolCallsPerRun: MAX_TOOL_CALLS_PER_RUN,
-      llmToolTemperature: LLM_TOOL_TEMPERATURE,
-      llmSummaryTemperature: LLM_SUMMARY_TEMPERATURE,
-      llmMaxTokensToolResult: LLM_MAX_TOKENS_TOOL_RESULT,
-      llmMaxTokensSimple: LLM_MAX_TOKENS_SIMPLE,
-      llmMaxTokensSummary: LLM_MAX_TOKENS_SUMMARY,
-      llmContextWindow: parseInt(process.env.LLM_CONTEXT_WINDOW || "32768", 10),
-      piiScrub: _piiScrub,
-    }));
+    );
     agentRunsTotal.inc({ status: "success" });
     logger.info({ toolCalls: result.toolCalls.length, truncated: result.truncated, promptTokens: result.llmUsage.promptTokens, completionTokens: result.llmUsage.completionTokens }, "agent task complete");
     broadcastSSE("spending", getSpendingSummary());
@@ -396,13 +466,43 @@ app.post("/agent/policy", (req, res) => {
   const recipientId = (req.query.recipient_id as string) || "rosa";
   setCurrentRecipient(recipientId);
   setSpendingPolicy(result.data);
+  appendAuditEntry({
+    event: "agent.policy_updated",
+    actor: "api",
+    details: {
+      ip: req.ip,
+      userAgent: req.headers["user-agent"],
+      policy: result.data,
+      recipientId,
+    },
+  });
   broadcastSSE("spending", getSpendingSummary());
   res.json({ success: true, policy: result.data, recipientId });
+});
+// #1238: replay recent payments through check_spending_policy's rules under
+// the proposed policy so the dashboard can preview a change before saving it.
+app.post("/agent/policy/preview", (req, res) => {
+  const result = SpendingPolicySchema.safeParse(req.body);
+  if (!result.success) {
+    return res.status(400).json({ error: "Invalid policy", issues: result.error.issues });
+  }
+  const recipientId = (req.query.recipient_id as string) || "rosa";
+  setCurrentRecipient(recipientId);
+  res.json({ recipientId, impact: previewSpendingPolicy(result.data) });
 });
 app.post("/agent/reset", (req, res) => {
   const recipientId = (req.query.recipient_id as string) || "rosa";
   setCurrentRecipient(recipientId);
   resetSpendingTracker();
+  appendAuditEntry({
+    event: "agent.reset",
+    actor: "api",
+    details: {
+      ip: req.ip,
+      userAgent: req.headers["user-agent"],
+      recipientId,
+    },
+  });
   broadcastSSE("spending", getSpendingSummary());
   broadcastSSE("transactions", getSpendingTracker());
   res.json({ success: true, recipientId });
@@ -439,6 +539,8 @@ let recipientProfiles: Record<string, RecipientProfile> = {};
 for (const [id, profile] of Object.entries(DEFAULT_RECIPIENTS)) {
   recipientProfiles[id] = { ...profile, medications: [...profile.medications] };
 }
+registerKnownNames([caregiverProfile.name]);
+registerKnownNames(Object.values(recipientProfiles).map((p) => p.name));
 
 app.get("/agent/recipients", (_req, res) => {
   res.json({ recipients: Object.keys(recipientProfiles), profiles: recipientProfiles });
@@ -450,7 +552,10 @@ app.put("/agent/recipients/:recipientId", (req, res) => {
   if (!recipientProfiles[recipientId]) {
     recipientProfiles[recipientId] = { ...DEFAULT_RECIPIENTS.rosa, name: recipientId, medications: [] };
   }
-  if (name) recipientProfiles[recipientId].name = name;
+  if (name) {
+    recipientProfiles[recipientId].name = name;
+    registerKnownNames([name]);
+  }
   if (typeof age === "number") recipientProfiles[recipientId].age = age;
   if (Array.isArray(medications)) recipientProfiles[recipientId].medications = medications;
   if (doctor) recipientProfiles[recipientId].doctor = doctor;
@@ -474,12 +579,18 @@ app.patch("/agent/profile", (req, res) => {
       recipientProfiles[recipientId] = { ...DEFAULT_RECIPIENTS.rosa, name: recipientId, medications: [] };
     }
     recipientProfiles[recipientId] = { ...recipientProfiles[recipientId], ...recipient };
+    if (recipient.name) {
+      registerKnownNames([recipient.name]);
+    }
     if (Array.isArray(recipient.medications)) {
       recipientProfiles[recipientId].medications = recipient.medications;
     }
   }
   if (caregiver && typeof caregiver === "object") {
     Object.assign(caregiverProfile, caregiver);
+    if (caregiver.name) {
+      registerKnownNames([caregiver.name]);
+    }
   }
   res.json({ recipient: recipientProfiles[recipientId], caregiver: caregiverProfile });
 });
@@ -496,12 +607,32 @@ app.get("/agent/adherence/pending", (req, res) => {
   res.json({ pending, count: pending.length, recipientId });
 });
 
+// #1237: dated adherence events, charted alongside logged vitals.
+app.get("/agent/adherence/timeline", (req, res) => {
+  const recipientId = (req.query.recipient_id as string) || "rosa";
+  res.json({ recipientId, events: getAdherenceTimeline(recipientId) });
+});
+
 app.post("/agent/adherence/confirm", (req, res) => {
   const { record_id } = req.body ?? {};
   if (!record_id) return res.status(400).json({ error: "record_id is required" });
   const success = confirmAdherenceReminder(record_id);
   res.json({ success: success.success });
 });
+
+// #1254: the OverviewTab adherence check's "Not Yet" — marks the most recent
+// pending dose as skipped so persistent skips can escalate to flagged.
+app.post("/agent/adherence/skip", (req, res) => {
+  const { record_id } = req.body ?? {};
+  if (!record_id) return res.status(400).json({ error: "record_id is required" });
+  const success = skipAdherence(record_id);
+  res.json({ success });
+});
+
+// --- Vitals endpoints (#1237) ---
+app.use("/agent", createVitalsRouter(createVitalsStore()));
+// #1193: searchable history of past drug interaction checks.
+app.use("/agent", createInteractionChecksRouter(getInteractionCheckStore()));
 
 // --- Dispute letter endpoint (#266) ---
 app.post("/agent/dispute-letter", (req, res) => {
@@ -524,18 +655,99 @@ app.post("/agent/dispute-letter", (req, res) => {
   res.json(letter);
 });
 
+// --- Allergies endpoints (#1230) ---
+app.get("/agent/allergies", (req, res) => {
+  const recipientId = (req.query.recipient_id as string) || (req.query.recipientId as string) || "rosa";
+  res.json({ allergies: loadRecipientAllergies(recipientId), recipientId });
+});
+
+app.post("/agent/allergies", (req, res) => {
+  const recipientId = (req.query.recipient_id as string) || (req.body.recipientId as string) || "rosa";
+  const { substance, severity, reaction, notes } = req.body ?? {};
+  if (!substance || !severity) {
+    return res.status(400).json({ error: "substance and severity are required" });
+  }
+  const created = addRecipientAllergy({ substance, severity, reaction, notes }, recipientId);
+  res.status(201).json(created);
+});
+
+app.delete("/agent/allergies/:id", (req, res) => {
+  const recipientId = (req.query.recipient_id as string) || "rosa";
+  const success = removeRecipientAllergy(req.params.id, recipientId);
+  res.json({ success });
+});
+
+// --- Co-Caregiver Presence endpoints (#1231) ---
+app.get("/agent/presence", (req, res) => {
+  const recipientId = (req.query.recipient_id as string) || (req.query.recipientId as string) || "rosa";
+  res.json({ presence: loadPresenceMap(recipientId), recipientId });
+});
+
+app.post("/agent/presence/view", (req, res) => {
+  const { itemId, itemType, caregiverId, caregiverName, avatar, recipientId } = req.body ?? {};
+  if (!itemId || !itemType || !caregiverId || !caregiverName) {
+    return res.status(400).json({ error: "itemId, itemType, caregiverId, and caregiverName are required" });
+  }
+  const entry = recordItemView({
+    itemId,
+    itemType,
+    caregiverId,
+    caregiverName,
+    avatar,
+    recipientId,
+  });
+  res.json({ success: true, entry });
+});
+
+// --- Bill OCR endpoint (#1229) ---
+app.post("/bill/ocr", async (req, res) => {
+  const { image } = req.body ?? {};
+  if (!image || typeof image !== "string") {
+    return res.status(400).json({ error: "image (base64) is required" });
+  }
+  try {
+    const result = await extractLineItemsFromBillImage(image);
+    res.json(result);
+  } catch (err: any) {
+    res.status(500).json({ error: err?.message || "OCR extraction failed" });
+  }
+});
+
+// --- Price watch endpoint (#1236) ---
+app.post("/agent/price-watch/run", async (req, res) => {
+  const recipientId = (req.query.recipient_id as string) || "rosa";
+  try {
+    const result = await runPriceWatchForRecipient(recipientId);
+    res.json(result);
+  } catch (err: any) {
+    res.status(500).json({ error: err?.message || "Price watch failed" });
+  }
+});
+
 // Startup: verify agent wallet has USDC balance
 async function verifyWallet() {
   try {
-    const account = await horizonServer.loadAccount(agentKeypair.publicKey());
-    const usdcBalance = account.balances.find((b: any) => b.asset_code === "USDC" && b.asset_issuer === process.env.USDC_ISSUER);
-    if (!usdcBalance) {
-      logger.error({ wallet: agentKeypair.publicKey() }, "agent wallet has no USDC trustline — fund at https://faucet.circle.com");
+    const balances = await fetchWalletBalances(
+      agentKeypair.publicKey(),
+      STELLAR_CONFIG.horizonUrl,
+      process.env.USDC_ISSUER || "",
+    );
+    if (!balances.hasUsdcTrustline) {
+      logger.error(
+        { wallet: agentKeypair.publicKey() },
+        "agent wallet has no USDC trustline — fund at https://faucet.circle.com",
+      );
       process.exit(1);
     }
-    logger.info({ usdc: usdcBalance.balance, xlm: account.balances.find((b: any) => b.asset_type === "native")?.balance || "0" }, "wallet balances");
+    logger.info(
+      { usdc: balances.usdc.toFixed(2), xlm: balances.xlm.toFixed(2) },
+      "wallet balances",
+    );
   } catch (err: any) {
-    logger.error({ err: err.message, wallet: agentKeypair.publicKey() }, "failed to load agent wallet");
+    logger.error(
+      { err: err.message, wallet: agentKeypair.publicKey() },
+      "failed to load agent wallet",
+    );
     process.exit(1);
   }
 }
@@ -592,15 +804,4 @@ const server = app.listen(PORT, async () => {
   await verifyWallet();
 });
 
-process.on("SIGTERM", () => {
-  logger.info("SIGTERM received. Draining server...");
-  isDraining = true;
-  server.close(() => {
-    logger.info("Server closed. Exiting process.");
-    process.exit(0);
-  });
-  setTimeout(() => {
-    logger.error("Graceful shutdown timeout. Forcing exit.");
-    process.exit(1);
-  }, 30000);
-});
+gracefulShutdown({ server, onDrainStart: () => { isDraining = true; } });

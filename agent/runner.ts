@@ -19,6 +19,7 @@ import {
   agentLlmContextUsageRatio,
   agentLlmErrorTotal,
   agentIterationLimitTotal,
+  agentLlmLatencyMs,
 } from "../shared/metrics.ts";
 import {
   comparePharmacyPrices,
@@ -39,6 +40,9 @@ import {
   getAdherenceStatus,
   confirmAdherenceReminder,
   setCurrentRecipient,
+  checkRecipientAllergies,
+  runPriceWatch,
+  getHandoffNotes,
   TOOL_DEFINITIONS,
   validateToolInput,
 } from "./tools.ts";
@@ -46,6 +50,7 @@ import {
   fetchToolResult,
   serializeToolResultForPrompt,
 } from "./tool-result.ts";
+import { recordInteractionCheck } from "../services/interaction-checks/db.ts";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -69,6 +74,12 @@ export interface RunAgentOptions {
   model: string;
   maxIterations?: number;
   maxToolCallsPerRun?: number;
+  /**
+   * Optional progress sink (#1253): invoked with the tool name right before
+   * each tool executes, so a caller (the server's SSE stream) can surface
+   * which step of a multi-tool-call task is in progress.
+   */
+  onProgress?: (progress: { tool: string; iteration: number }) => void;
   llmToolTemperature?: number;
   llmSummaryTemperature?: number;
   llmMaxTokensToolResult?: number;
@@ -80,7 +91,7 @@ export interface RunAgentOptions {
 
 export interface RunAgentResult {
   response: string;
-  toolCalls: Array<{ tool: string; input: Record<string, unknown>; result: ToolResult }>;
+  toolCalls: Array<{ id: string; tool: string; input: Record<string, unknown>; result: ToolResult }>;
   spending: ReturnType<typeof getSpendingSummary>;
   llmUsage: { promptTokens: number; completionTokens: number };
   truncated: boolean;
@@ -113,6 +124,7 @@ IMPORTANT RULES:
   DISALLOWED: Do not add, extrapolate, or fabricate any line item, amount, or CPT code that was not in the tool output.
 - Report the total savings found and the cost of the agent's API queries
 - After paying for medication, schedule an adherence reminder
+- Before answering questions about the care recipient's recent care (doses, symptoms, how they are doing), call get_handoff_notes and take the latest caregiver handoff notes into account
 - When audit errors are found, offer to generate a dispute letter via generate_dispute_letter
 - If a tool result is truncated and includes resultId or a summary, call fetch_tool_result to page through the remaining data before making conclusions
 
@@ -196,6 +208,18 @@ export async function executeTool(name: string, input: Record<string, unknown>):
         break;
       case "check_drug_interactions":
         result = await checkDrugInteractions(input.medications as string[]);
+        // #1193: keep a per-recipient history of completed checks.
+        recordInteractionCheck(rid, input.medications as string[], result);
+        break;
+      case "check_allergies":
+        result = checkRecipientAllergies(input.medications as string[], rid);
+        break;
+      case "run_price_watch":
+        result = await runPriceWatch(
+          rid,
+          input.medications as string[] | undefined,
+          input.zip_code as string | undefined,
+        );
         break;
       case "fetch_tool_result":
         result = fetchToolResult(
@@ -249,6 +273,12 @@ export async function executeTool(name: string, input: Record<string, unknown>):
       case "confirm_adherence":
         result = confirmAdherenceReminder(input.record_id as string);
         break;
+      case "get_handoff_notes":
+        result = getHandoffNotes(
+          input.recipient_id as string | undefined,
+          input.limit as number | undefined,
+        );
+        break;
       default:
         result = { error: `Unknown tool: ${name}` };
     }
@@ -294,6 +324,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<RunAgentResult> {
     llmMaxTokensSummary = 4096,
     llmContextWindow = 32768,
     piiScrub = true,
+    onProgress,
   } = opts;
 
   const systemPrompt = buildSystemPrompt(profile, profile.caregiver.name);
@@ -310,7 +341,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<RunAgentResult> {
     { role: "user", content: userTask },
   ];
 
-  const toolCalls: Array<{ tool: string; input: Record<string, unknown>; result: ToolResult }> = [];
+  const toolCalls: Array<{ id: string; tool: string; input: Record<string, unknown>; result: ToolResult }> = [];
   let finalResponse = "";
   let llmUsage = { promptTokens: 0, completionTokens: 0 };
   let runToolCalls = 0;
@@ -333,6 +364,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<RunAgentResult> {
         llmMaxTokensSummary,
       );
 
+      const startTime = performance.now();
       response = await llm.chat.completions.create({
         model,
         temperature,
@@ -340,6 +372,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<RunAgentResult> {
         tools: LLM_TOOLS,
         messages,
       });
+      agentLlmLatencyMs.set({ model }, performance.now() - startTime);
     } catch (llmErr: any) {
       logger.error({ err: llmErr.message, iteration }, "LLM API error");
       agentLlmErrorTotal.inc();
@@ -399,6 +432,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<RunAgentResult> {
 
     if (runToolCalls + message.tool_calls.length > maxToolCallsPerRun) {
       truncated = true;
+      events.push({ kind: "tool_call_cap_reached" });
       appendAuditEntry({
         event: "agent.tool_cap_exceeded",
         actor: "agent",
@@ -421,14 +455,16 @@ export async function runAgent(opts: RunAgentOptions): Promise<RunAgentResult> {
 
       logger.info({ tool: fnName, args: JSON.stringify(fnArgs).slice(0, 100) }, "tool call");
 
+      onProgress?.({ tool: fnName, iteration });
+
       let result: ToolResult;
       try {
         result = await executeTool(fnName, fnArgs);
-        toolCalls.push({ tool: fnName, input: fnArgs, result });
+        toolCalls.push({ id: toolCall.id, tool: fnName, input: fnArgs, result });
       } catch (err: any) {
         logger.error({ tool: fnName, err: err.message }, "tool error");
         result = { error: err.message };
-        toolCalls.push({ tool: fnName, input: fnArgs, result });
+        toolCalls.push({ id: toolCall.id, tool: fnName, input: fnArgs, result });
       }
 
       appendAuditEntry({

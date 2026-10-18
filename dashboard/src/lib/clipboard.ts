@@ -1,3 +1,5 @@
+import { toast } from "sonner";
+
 export type CopyResult = "ok" | "fallback" | "failed";
 
 export async function copyText(text: string): Promise<CopyResult> {
@@ -39,5 +41,6 @@ export async function copyText(text: string): Promise<CopyResult> {
     }
   }
 
+  toast.error("Couldn't copy to clipboard. Press Ctrl+C to copy manually.");
   return "failed";
 }

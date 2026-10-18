@@ -14,7 +14,7 @@ export interface AgentLlmError {
 
 export interface AgentResult {
   response: string;
-  toolCalls: Array<{ tool: string; input: unknown; result: any }>;
+  toolCalls: Array<{ id?: string; tool: string; input: unknown; result: any }>;
   spending: SpendingData;
   llmUsage?: {
     promptTokens: number;
@@ -36,6 +36,7 @@ export interface AgentLogEntry {
   id: string;
   timestamp: number;
   message: string;
+  errorDetail?: string;
 }
 
 export interface PaginationData {
@@ -54,6 +55,7 @@ export const DASHBOARD_TABS = [
   "policy",
   "wallet",
   "activity",
+  "notes",
   "settings",
 ] as const;
 

@@ -2,6 +2,58 @@ global:
   scrape_interval: 5s
   evaluation_interval: 5s
 
+# ---------------------------------------------------------------------------
+# Rule files
+# ---------------------------------------------------------------------------
+# recording-rules.yml — pre-aggregated SLI ratio series (multi-window pairs)
+#   used by Grafana dashboards and by the alert expressions below so they can
+#   reference cheap, stable series instead of recomputing raw counter rates.
+# rules.yml — alerting rules for key failure conditions (Issue #774).
+#
+# Validate both files with:
+#   promtool check config docker/prometheus/prometheus.yml
+rule_files:
+  - "recording-rules.yml"
+  - "rules.yml"
+
+# ---------------------------------------------------------------------------
+# Alertmanager — routing path from rule fire to notification
+# ---------------------------------------------------------------------------
+# Interim decision (no Alertmanager container deployed):
+#
+#   This project does not yet run a dedicated Alertmanager instance.
+#   Alert routing is handled by Grafana's built-in alerting engine instead:
+#
+#     1. Prometheus evaluates the rules in rules.yml on every evaluation_interval.
+#     2. Grafana (port 3030) scrapes Prometheus as a data source.
+#     3. Grafana Alert Rules mirror the same PromQL expressions and forward
+#        firing alerts to a Grafana Contact Point (e-mail, Slack, PagerDuty, etc.)
+#        configured under Alerting → Contact points in the Grafana UI.
+#     4. Notification policies in Grafana control grouping, repeat intervals,
+#        and silence windows — replacing the Alertmanager routes/receivers config.
+#
+#   This is a documented interim: once the deployment warrants a dedicated
+#   on-call pager workflow, add an Alertmanager container to docker-compose.yml,
+#   uncomment the section below, and remove the Grafana-managed alert rules that
+#   duplicate the Prometheus rule expressions.
+#
+#   When Alertmanager IS wired up, the routing path will be:
+#     Prometheus evaluates rule → ALERTS metric fires →
+#     Prometheus pushes to Alertmanager (alertmanagers targets below) →
+#     Alertmanager groups & deduplicates → routes to receiver (Slack/PagerDuty) →
+#     notification delivered to on-call engineer.
+#
+# Uncomment and populate when Alertmanager is deployed:
+#
+# alerting:
+#   alertmanagers:
+#     - static_configs:
+#         - targets:
+#             - "alertmanager:9093"   # docker-compose service name + port
+#       scheme: http
+#       timeout: 10s
+#       api_version: v2
+
 scrape_configs:
   # When running via docker compose, the server is reachable as `server` on
   # the shared bridge network. For host-only Prometheus (no compose), uncomment

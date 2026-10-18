@@ -79,23 +79,24 @@ process.env.BILL_PROVIDER_PUBLIC_KEY = "GBQTESTBILLPROVIDERPUBKEY";
 process.env.MPP_SECRET_KEY = "test-mpp-secret-key";
 process.env.CAREGIVER_TOKEN = "test-caregiver-token";
 process.env.ALLOWED_ORIGINS = "http://localhost:3000";
+process.env.AGENT_API_KEY = "test-agent-api-key";
 
 const { app } = await import("../../server.ts");
-const auth = (req: any) => req.set("Authorization", "Bearer test-caregiver-token");
+const auth = (req: any) => req.set("Authorization", "Bearer test-agent-api-key");
 
 describe("Caregiver Auth & CORS Security (Issue #267)", () => {
   // Auth tests: use POST /agent/run (rate-limited to 5/min, but only 2 calls total)
-  it("rejects requests without a caregiver token with 401", async () => {
+  it("rejects requests without an agent API key with 401", async () => {
     const res = await request(app).post("/agent/run").send({ task: "test" });
     expect(res.status).toBe(401);
   });
 
-  it("rejects requests with an invalid caregiver token with 403", async () => {
+  it("rejects requests with an invalid agent API key with 401", async () => {
     const res = await request(app)
       .post("/agent/run")
       .set("Authorization", "Bearer invalid-token")
       .send({ task: "test" });
-    expect(res.status).toBe(403);
+    expect(res.status).toBe(401);
   });
 
   // CORS + cookie tests: use /health (unlimited rate limit)
@@ -120,10 +121,9 @@ describe("Caregiver Auth & CORS Security (Issue #267)", () => {
       .get("/health")
       .set("Cookie", "caregiver_token=test-caregiver-token; csrf_token=my-csrf-token")
       .send();
-    // /health doesn't require auth, so test CSRF on an agent endpoint via OPTIONS preflight
-    // Instead, directly test requireCaregiverToken by hitting /agent/status with cookie
+    // /health doesn't require auth, so test CSRF on a caregiver-token endpoint
     const agentRes = await request(app)
-      .get("/agent/status")
+      .get("/recipients")
       .set("Cookie", "caregiver_token=test-caregiver-token; csrf_token=my-csrf-token")
       .send();
     expect(agentRes.status).toBe(403);
@@ -132,7 +132,7 @@ describe("Caregiver Auth & CORS Security (Issue #267)", () => {
 
   it("accepts cookie auth when valid CSRF header is provided", async () => {
     const res = await request(app)
-      .get("/agent/status")
+      .get("/recipients")
       .set("Cookie", "caregiver_token=test-caregiver-token; csrf_token=my-csrf-token")
       .set("X-CSRF-Token", "my-csrf-token")
       .send();

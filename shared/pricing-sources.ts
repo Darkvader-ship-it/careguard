@@ -6,13 +6,7 @@
  */
 
 import { logger } from "./logger.ts";
-
-export interface PharmacyPrice {
-  pharmacy: string;
-  id: string;
-  price: number;
-  distance: string;
-}
+import { PRICING_DATABASE, getPharmacyPrices, type PharmacyPrice } from "./pharmacy-pricing.ts";
 
 export interface PricingProvider {
   name: string;
@@ -71,56 +65,11 @@ export abstract class BasePricingProvider implements PricingProvider {
 export class StaticProvider extends BasePricingProvider {
   name = "static";
   
-  private static PRICING_DATABASE: Record<string, PharmacyPrice[]> = (() => {
-    const raw: Record<string, PharmacyPrice[]> = {
-    lisinopril: [
-      { pharmacy: "Costco Pharmacy", id: "costco-001", price: 3.50, distance: "2.1 mi" },
-      { pharmacy: "Walmart Pharmacy", id: "walmart-001", price: 4.00, distance: "1.8 mi" },
-      { pharmacy: "CVS Pharmacy", id: "cvs-001", price: 12.99, distance: "0.5 mi" },
-      { pharmacy: "Walgreens", id: "walgreens-001", price: 15.49, distance: "0.8 mi" },
-      { pharmacy: "Rite Aid", id: "riteaid-001", price: 18.99, distance: "3.2 mi" },
-    ],
-    metformin: [
-      { pharmacy: "Costco Pharmacy", id: "costco-001", price: 4.00, distance: "2.1 mi" },
-      { pharmacy: "Walmart Pharmacy", id: "walmart-001", price: 4.00, distance: "1.8 mi" },
-      { pharmacy: "CVS Pharmacy", id: "cvs-001", price: 11.99, distance: "0.5 mi" },
-      { pharmacy: "Walgreens", id: "walgreens-001", price: 13.49, distance: "0.8 mi" },
-      { pharmacy: "Rite Aid", id: "riteaid-001", price: 16.79, distance: "3.2 mi" },
-    ],
-    atorvastatin: [
-      { pharmacy: "Costco Pharmacy", id: "costco-001", price: 6.50, distance: "2.1 mi" },
-      { pharmacy: "Walmart Pharmacy", id: "walmart-001", price: 9.00, distance: "1.8 mi" },
-      { pharmacy: "CVS Pharmacy", id: "cvs-001", price: 24.99, distance: "0.5 mi" },
-      { pharmacy: "Walgreens", id: "walgreens-001", price: 28.49, distance: "0.8 mi" },
-      { pharmacy: "Rite Aid", id: "riteaid-001", price: 31.99, distance: "3.2 mi" },
-    ],
-    amlodipine: [
-      { pharmacy: "Costco Pharmacy", id: "costco-001", price: 4.20, distance: "2.1 mi" },
-      { pharmacy: "Walmart Pharmacy", id: "walmart-001", price: 4.00, distance: "1.8 mi" },
-      { pharmacy: "CVS Pharmacy", id: "cvs-001", price: 14.99, distance: "0.5 mi" },
-      { pharmacy: "Walgreens", id: "walgreens-001", price: 17.49, distance: "0.8 mi" },
-      { pharmacy: "Rite Aid", id: "riteaid-001", price: 19.99, distance: "3.2 mi" },
-    ],
-    omeprazole: [
-      { pharmacy: "Costco Pharmacy", id: "costco-001", price: 5.80, distance: "2.1 mi" },
-      { pharmacy: "Walmart Pharmacy", id: "walmart-001", price: 8.50, distance: "1.8 mi" },
-      { pharmacy: "CVS Pharmacy", id: "cvs-001", price: 22.99, distance: "0.5 mi" },
-      { pharmacy: "Walgreens", id: "walgreens-001", price: 25.49, distance: "0.8 mi" },
-      { pharmacy: "Rite Aid", id: "riteaid-001", price: 27.99, distance: "3.2 mi" },
-    ],
-    };
-    return Object.fromEntries(Object.entries(raw).map(([k, v]) => [k.toLowerCase(), v]));
-  })();
+  private static readonly PRICING_DATABASE = PRICING_DATABASE;
 
-  async getPrices(drugName: string, _zipCode?: string): Promise<PharmacyPrice[]> {
-    const normalized = drugName.toLowerCase();
-    const prices = StaticProvider.PRICING_DATABASE[normalized];
-    
-    if (!prices) {
-      throw new Error(`Drug not found: ${drugName}`);
-    }
-    
-    return prices;
+  async getPrices(drugName: string, zipCode?: string): Promise<PharmacyPrice[]> {
+    const res = getPharmacyPrices(drugName, zipCode);
+    return res.prices;
   }
 
   async getDrugCount(): Promise<number> {
@@ -1010,21 +959,23 @@ export class CostcoRxProvider extends BasePricingProvider {
   }
 }
 
+export const PRICING_PROVIDER_CONFIG = [
+  { name: "static", description: "Local fallback pricing database", create: () => new StaticProvider() },
+  { name: "goodrx", description: "GoodRx-style prescription pricing database", create: () => new GoodRxProvider() },
+  { name: "costco", description: "Costco Rx pricing database", create: () => new CostcoRxProvider() },
+] as const;
+
 /**
  * Provider Factory - Creates provider instances based on configuration
  */
 export function createPricingProvider(providerName?: string): PricingProvider {
   const provider = (providerName || process.env.PHARMACY_PRICING_PROVIDER || "static").toLowerCase();
-  
-  switch (provider) {
-    case "goodrx":
-      return new GoodRxProvider();
-    case "costco":
-      return new CostcoRxProvider();
-    case "static":
-      return new StaticProvider();
-    default:
-      logger.warn({ provider }, "unknown pricing provider, falling back to static");
-      return new StaticProvider();
+
+  const registration = PRICING_PROVIDER_CONFIG.find((config) => config.name === provider);
+  if (registration) {
+    return registration.create();
   }
+
+  logger.warn({ provider }, "unknown pricing provider, falling back to static");
+  return new StaticProvider();
 }

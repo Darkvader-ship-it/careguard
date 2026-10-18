@@ -2,6 +2,8 @@
 
 CareGuard enforces five limits on every payment the agent makes:
 
+See also the worked examples in [docs/guides/category-budgets-examples.md](guides/category-budgets-examples.md) for a caregiver-friendly explanation of how the category budgets interact with the overall monthly cap.
+
 | Field | Default | Description |
 |---|---|---|
 | `dailyLimit` | $100 | Maximum total spending (medications + bills) within one calendar day in the caregiver's timezone |
@@ -36,6 +38,20 @@ The default is `America/Phoenix` because it matches the CareGuard caregiver pers
 ### Implementation
 
 `agent/tz.ts` exports `getLocalDateStr(tz, date?)` which uses `Intl.DateTimeFormat('en-CA', { timeZone: tz })` to format a date as `YYYY-MM-DD` in the given timezone. `checkSpendingPolicy` in `agent/tools.ts` calls this to determine both "today" and the date of each past transaction before comparing.
+
+### Local reset simulation
+
+Use the helper script to verify daily reset behavior without changing your
+system clock:
+
+```bash
+npm run simulate:spending-reset -- --timezone=America/New_York --recipient=rosa
+```
+
+The script reads local spending state from `data/recipients/<recipient>/spending.json`
+or the legacy `data/spending.json`, simulates one minute before and after the
+next local midnight, and prints the before/after spending totals. Pass
+`--now=<ISO timestamp>` to reproduce a specific boundary.
 
 ## Platform Cap (`MAX_SINGLE_TX_USDC`)
 
@@ -75,3 +91,40 @@ Limits are validated client-side and server-side:
 - `dailyLimit` must not exceed `monthlyLimit`
 - `medicationMonthlyBudget + billMonthlyBudget` must not exceed `monthlyLimit`
 - `approvalThreshold` must not exceed the smallest of `dailyLimit`, `medicationMonthlyBudget`, and `billMonthlyBudget`
+
+## Enforcement Flow
+
+1. **Policy Configuration**: Caregivers configure spending policies via the CareGuard dashboard (e.g., daily limit, monthly budget, approval threshold).
+2. **Persistence**: The policy is saved to the agent's local filesystem (`data/recipients/<id>/policy.json`).
+3. **Evaluation**: Before executing any payment (e.g., via the Pharmacy API or Bill Audit API), the agent evaluates the requested amount against the current policy using the `checkSpendingPolicy` engine.
+4. **Enforcement**: 
+   - If the payment is within limits, it proceeds.
+   - If it exceeds an approval threshold, it enters a `pending` state awaiting caregiver approval.
+   - If it exceeds a strict limit (e.g., daily limit), it is rejected.
+   
+This enforcement is strictly **server-side**, handled by the CareGuard agent itself before the Stellar transaction is signed.
+
+## Trust Model
+
+Currently, CareGuard operates on a trusted-agent model:
+- The caregiver trusts the CareGuard agent to correctly enforce the policy.
+- The agent holds the private keys necessary to authorize payments.
+- The underlying Stellar network executes the payments without knowing about the CareGuard-specific spending limits.
+
+## Threat Model
+
+Because enforcement is server-side, the following threats apply:
+- **Compromised Agent Server**: An attacker who compromises the CareGuard server could bypass the spending policy engine and sign arbitrary transactions using the agent's stored keys.
+- **Clock Manipulation**: The daily limit boundary relies on the local server time (or the configured `timezone`). If the server time is manipulated, the agent might reset the daily spending limit prematurely.
+
+## Current Limitations
+
+- **No On-Chain Enforcement**: The Stellar network and Soroban contracts do not currently enforce these specific CareGuard spending policies on-chain.
+- **Single Point of Failure**: The agent is responsible for both holding the funds/keys and enforcing the rules.
+
+## Future Soroban Enforcement Possibilities
+
+To mitigate the current limitations, future versions of CareGuard could migrate policy enforcement directly to Soroban smart contracts:
+- **Smart Wallets**: Deploy a Soroban smart contract as the care recipient's wallet.
+- **On-Chain Policies**: Store the daily/monthly limits and approval thresholds directly in the contract state.
+- **Trustless Enforcement**: The agent would submit payment requests to the contract. The contract would independently evaluate the spending policy and only execute the transfer if the rules are met, eliminating the need to trust the agent server for policy enforcement.

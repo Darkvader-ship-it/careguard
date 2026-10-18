@@ -20,15 +20,15 @@ import { USDC_SAC_TESTNET } from "@stellar/mpp";
 import { createCorsMiddleware } from "../../shared/cors.ts";
 import { applySecurityMiddleware } from "../../shared/security-middleware.ts";
 import { logger } from "../../shared/logger.ts";
-import { requestContextMiddleware } from "../../shared/request-context.ts";
-import { requestLoggerMiddleware } from "../../shared/request-logger.ts";
+import { requestLifecycleMiddleware } from "../../shared/request-lifecycle.ts";
+import { gracefulShutdown } from "../../shared/graceful-shutdown.ts";
 import { sanitizeUserString } from "../../shared/sanitize.ts";
 import {
   MedicationOrderSchema,
   type MedicationOrderInput,
 } from "./validation.ts";
 
-const PORT = parseInt(process.env.PHARMACY_PAYMENT_PORT || "3005");
+const PORT = parseInt(process.env.PHARMACY_PAYMENT_PORT || "3005", 10);
 const RECIPIENT = process.env.PHARMACY_1_PUBLIC_KEY;
 const MPP_SECRET_KEY = process.env.MPP_SECRET_KEY;
 const NETWORK = "stellar:testnet";
@@ -37,10 +37,10 @@ if (!RECIPIENT) throw new Error("PHARMACY_1_PUBLIC_KEY required in .env");
 if (!MPP_SECRET_KEY) throw new Error("MPP_SECRET_KEY required in .env");
 
 // Order storage (persisted to file)
-import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync } from "fs";
+import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync, accessSync, constants as fsConstants } from "fs";
 import lock from "proper-lockfile";
 
-const DATA_DIR = new URL("../../data", import.meta.url).pathname;
+const DATA_DIR = process.env.DATA_DIR || new URL("../../data", import.meta.url).pathname;
 const ORDERS_FILE = `${DATA_DIR}/orders.json`;
 const MPP_STORE_FILE = `${DATA_DIR}/mpp-store.json`;
 
@@ -105,12 +105,11 @@ async function saveOrder(order: any) {
   }
 }
 
-const app = express();
+export const app = express();
 applySecurityMiddleware(app);
 app.use(createCorsMiddleware());
 app.use(express.json({ limit: process.env.JSON_BODY_LIMIT ?? "20kb" }));
-app.use(requestContextMiddleware());
-app.use(requestLoggerMiddleware());
+app.use(requestLifecycleMiddleware());
 
 app.get("/", (_req, res) => {
   res.json({
@@ -155,10 +154,14 @@ app.post("/pharmacy/order", async (req, res) => {
   const safeDrug = sanitizeUserString(order.drug);
   const safePharmacy = sanitizeUserString(order.pharmacy);
 
-  // Convert Express request to Web Request for mppx
+  // Convert Express request to Web Request for mppx. Never forward the
+  // caller's own auth/session headers into the upstream MPP charge call —
+  // mppx only needs the payment-protocol headers (e.g. X-Payment).
+  const FORWARD_HEADER_BLOCKLIST = new Set(["authorization", "cookie"]);
   const headers = new Headers();
   for (const [key, value] of Object.entries(req.headers)) {
     if (value == null) continue;
+    if (FORWARD_HEADER_BLOCKLIST.has(key.toLowerCase())) continue;
     if (Array.isArray(value)) {
       for (const entry of value) headers.append(key, entry);
     } else {
@@ -172,10 +175,17 @@ app.post("/pharmacy/order", async (req, res) => {
   });
 
   // Run MPP charge flow
-  const result = await mppx.charge({
-    amount: Number(order.amount).toFixed(2),
-    description: `Medication: ${safeDrug} from ${safePharmacy}`,
-  })(webReq);
+  let result;
+  try {
+    result = await mppx.charge({
+      amount: Number(order.amount).toFixed(2),
+      description: `Medication: ${safeDrug} from ${safePharmacy}`,
+    })(webReq);
+  } catch (err: any) {
+    logger.error({ err: err?.message }, "MPP charge flow failed — facilitator unavailable");
+    res.status(503).json({ error: "Payment facilitator unavailable, try again shortly" });
+    return;
+  }
 
   // 402 = client needs to sign and pay
   if (result.status === 402) {
@@ -226,22 +236,17 @@ app.get("/ready", (_req, res) => {
     res.status(503).send("Service Unavailable");
     return;
   }
+  try {
+    accessSync(DATA_DIR, fsConstants.W_OK);
+  } catch {
+    res.status(503).json({ error: "Order store is not writable" });
+    return;
+  }
   res.send("OK");
 });
 
-const server = app.listen(PORT, () => {
+export const server = app.listen(PORT, () => {
   logger.info({ port: PORT, network: NETWORK, recipient: RECIPIENT, currency: USDC_SAC_TESTNET }, "Pharmacy Payment Service (MPP Charge) started");
 });
 
-process.on("SIGTERM", () => {
-  logger.info("SIGTERM received. Draining server...");
-  isDraining = true;
-  server.close(() => {
-    logger.info("Server closed. Exiting process.");
-    process.exit(0);
-  });
-  setTimeout(() => {
-    logger.error("Graceful shutdown timeout. Forcing exit.");
-    process.exit(1);
-  }, 30000);
-});
+gracefulShutdown({ server, onDrainStart: () => { isDraining = true; } });

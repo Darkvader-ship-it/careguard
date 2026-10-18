@@ -36,7 +36,15 @@ Each route now has its own rate-limit bucket (configured in `shared/rate-limit.t
 | `RATE_LIMIT_DRUG_INTERACTIONS` | 30 req/min | `GET /drug/interactions` |
 | `RATE_LIMIT_PHARMACY_ORDER` | 10 req/min | `POST /pharmacy/order` |
 
-A `route_concurrent_requests{route}` Prometheus gauge is also emitted so operators can observe in-flight concurrency per route and alert on sustained saturation.
+An env value that is not a positive integer (empty, `abc`, `0`, `-5`, `2.5`) is
+ignored and the default in the table above applies — a typo must not silently
+disable limiting for a route.
+
+Rejected requests get `429` with a `Retry-After` header (window length in
+seconds) and are counted on `ratelimit_hits_total{policy}`, labelled per policy
+so one route's rejections are never attributed to another.
+
+A `route_concurrent_requests{route}` Prometheus gauge is also emitted so operators can observe in-flight concurrency per route and alert on sustained saturation. Express fires both `finish` and `close` for most responses, so the decrement is latched — the gauge counts each request exactly once and cannot drift negative.
 
 ### Long-term: split into per-service containers behind a gateway
 
@@ -67,5 +75,5 @@ This long-term split is tracked as a follow-up and is **not** part of this PR. T
 ## Alternatives Considered
 
 - **Single global rate limit with higher ceiling:** Rejected — does not prevent cross-route starvation.
-- **Redis-backed rate limiting:** Preferred for multi-instance deployments. The existing `rate-limit-redis` dependency supports this; enabling it requires setting `REDIS_URL`. Not activated here because the current deployment is single-instance.
+- **Redis-backed rate limiting:** Preferred for multi-instance deployments. The existing `rate-limit-redis` dependency supports this; enabling it requires setting `REDIS_URL`. Not activated here because the current deployment is single-instance. See [redis-down.md](../runbooks/redis-down.md) for what currently degrades (webhook replay protection) when `REDIS_URL` is unset or Redis is unreachable — rate limiting itself is unaffected today since it is not yet Redis-backed.
 - **Worker threads for LLM agent:** Deferred to long-term split.

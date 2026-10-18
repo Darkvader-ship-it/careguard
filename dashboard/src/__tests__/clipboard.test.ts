@@ -1,4 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+
+const { mockToastError } = vi.hoisted(() => ({
+  mockToastError: vi.fn(),
+}));
+
+vi.mock("sonner", () => ({ toast: { error: mockToastError } }));
+
 import { copyText } from "../lib/clipboard";
 
 function withGlobals({
@@ -111,6 +118,32 @@ describe("copyText", () => {
     });
     const result = await copyText("hello");
     expect(result).toBe("failed");
+  });
+
+  it("shows toast error when both paths fail", async () => {
+    const writeText = vi.fn().mockRejectedValue(new Error("denied"));
+    const exec = vi.fn().mockReturnValue(false);
+    withGlobals({
+      clipboardWrite: writeText,
+      isSecureContext: true,
+      execCommand: exec,
+    });
+    const result = await copyText("hello");
+    expect(result).toBe("failed");
+    expect(mockToastError).toHaveBeenCalled();
+    expect(mockToastError.mock.calls[0][0]).toContain("Couldn't copy to clipboard");
+  });
+
+  it("shows toast error when no clipboard API and no execCommand", async () => {
+    withGlobals({
+      clipboardWrite: null,
+      isSecureContext: false,
+      execCommand: null,
+    });
+    const result = await copyText("hello");
+    expect(result).toBe("failed");
+    expect(mockToastError).toHaveBeenCalled();
+    expect(mockToastError.mock.calls[0][0]).toContain("Couldn't copy to clipboard");
   });
 
   it("removes the textarea even when execCommand throws", async () => {

@@ -1,0 +1,38 @@
+name: OpenAPI
+
+on:
+  pull_request:
+    paths:
+      - "docs/openapi.yml"
+      - "scripts/gen-openapi.ts"
+      - "scripts/validate-openapi.ts"
+      - "shared/api-docs.ts"
+      - ".github/workflows/openapi.yml"
+  push:
+    branches: [main]
+
+jobs:
+  validate:
+    name: Validate OpenAPI spec
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: "npm"
+          cache-dependency-path: package-lock.json
+
+      - name: Install dependencies
+        run: npm ci --legacy-peer-deps
+
+      # Structure, YAML shape, and drift against scripts/gen-openapi.ts.
+      # Fails when docs/openapi.yml is malformed or was not regenerated.
+      - name: Validate spec structure and freshness
+        run: npm run validate:openapi
+
+      # Full OpenAPI 3.1 conformance lint. Runs from the registry so no
+      # dependency is added to package.json.
+      - name: Lint spec against OpenAPI 3.1
+        run: npx --yes @redocly/cli@1 lint docs/openapi.yml --format=stylish

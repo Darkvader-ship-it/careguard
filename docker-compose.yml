@@ -44,6 +44,7 @@ services:
         condition: service_started
 
   dashboard:
+    profiles: [full]
     build:
       context: .
       dockerfile: dashboard/Dockerfile
@@ -82,12 +83,14 @@ services:
     networks: [careguard]
 
   prometheus:
+    profiles: [monitoring]
     image: prom/prometheus:v2.55.0
     command:
       - "--config.file=/etc/prometheus/prometheus.yml"
-      - "--storage.tsdb.retention.time=7d"
+      - "--storage.tsdb.retention.time=35d"
     volumes:
       - ./docker/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./docker/prometheus/recording-rules.yml:/etc/prometheus/recording-rules.yml:ro
       - prometheus-data:/prometheus
     ports:
       - "9090:9090"
@@ -103,6 +106,7 @@ services:
         condition: service_started
 
   grafana:
+    profiles: [monitoring]
     image: grafana/grafana:11.3.0
     environment:
       GF_SECURITY_ADMIN_USER: "${GRAFANA_ADMIN_USER:-admin}"

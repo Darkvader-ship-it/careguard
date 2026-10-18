@@ -1,4 +1,6 @@
 import { z } from 'zod';
+import { getTranslations } from '../i18n';
+import { POLICY_FIELD_T_KEY } from './policy-field-labels';
 
 export const SpendingPolicyInput = z.object({
   dailyLimit: z.number(),
@@ -78,7 +80,12 @@ export function validatePolicy(input: unknown): PolicyValidation {
         field: f,
         message: `${FIELD_LABEL[f]} cannot be negative`,
       });
-    } else if (v[f] > 50000) {
+    } else if (f === 'holdTimeSeconds' && v[f] > 86400) {
+      errors.push({
+        field: f,
+        message: `${FIELD_LABEL[f]} cannot exceed 86,400`,
+      });
+    } else if (moneyFields.includes(f as any) && v[f] > 50000) {
       errors.push({
         field: f,
         message: `${FIELD_LABEL[f]} cannot exceed 50,000`,

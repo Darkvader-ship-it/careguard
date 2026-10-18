@@ -15,6 +15,14 @@ Operational runbooks for on-call engineers. Each runbook follows the template:
 | [oz-facilitator-outage.md](oz-facilitator-outage.md) | OZ facilitator unreachable — recognise, communicate, fail-open vs fail-closed decision |
 | [llm-rate-limit.md](llm-rate-limit.md) | Groq 429 / LLM provider rate-limit hit — behaviour, provider switching mid-incident |
 | [dashboard-disconnected.md](dashboard-disconnected.md) | Dashboard shows "Disconnected" chip — diagnosing API connectivity issues |
+| [horizon-down.md](horizon-down.md) | Stellar Horizon outage or testnet congestion — detection, in-doubt settlement verification, fee-bump tuning, recovery |
+| [backup-restore.md](backup-restore.md) | Disaster recovery procedure with RTO/RPO targets, backups, step-by-step restore, and integrity checks |
+
+| [rate-limit-tuning.md](rate-limit-tuning.md) | Safely tuning rate-limit env vars, Prometheus metric monitoring (`ratelimit_hits_total`), rollout, and rollback procedures |
+| [redis-down.md](redis-down.md) | Redis unavailable — in-process cache fallback, what state degrades (webhook replay protection), and recovery |
+| [disk-full.md](disk-full.md) | Disk full / data directory exhaustion — diagnosing largest writers, safe recovery without breaking the audit-log hash chain |
+| [grafana-backup.md](grafana-backup.md) | Grafana dashboard state lost after `docker compose down -v` — what's provisioned (survives) vs. UI-only (doesn't), exporting dashboards back into `docker/grafana/dashboards/`, restoring provisioning after a fresh boot |
+| [rate-limit-tuning.md](rate-limit-tuning.md) | Tuning `RATE_LIMIT_*` thresholds safely — reading `ratelimit_hits_total`, telling throttling apart from abuse, and rolling out a change without locking out the dashboard |
 
 ---
 
@@ -55,5 +63,6 @@ Permanent fix.
 
 - `docs/adr/` — architectural decision records
 - `docs/security/` — security policies and threat model
+- [`docs/observability/sentry.md`](../observability/sentry.md) — Sentry setup, redaction, and the escalation path that feeds into these runbooks
 - `CONTRIBUTING.md` — how to add a new runbook
 - `README.md` — project overview
