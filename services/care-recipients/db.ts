@@ -206,6 +206,20 @@ export class CareRecipientsStore {
         CHECK (delegator <> delegate),
         CHECK (ends_at > starts_at)
       );
+
+      -- Shared caregiver checklist (Issue #1200). Completed tasks are kept
+      -- (done = 1, completed_at set) so the dashboard can show a history.
+      CREATE TABLE IF NOT EXISTS care_tasks (
+        id TEXT PRIMARY KEY,
+        recipient_id TEXT NOT NULL REFERENCES care_recipients(id) ON DELETE CASCADE,
+        title TEXT NOT NULL,
+        assignee TEXT,
+        due_date TEXT,
+        done INTEGER NOT NULL DEFAULT 0,
+        completed_at TEXT,
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_care_tasks_recipient ON care_tasks(recipient_id, done);
       CREATE INDEX IF NOT EXISTS idx_approval_delegations_lookup
         ON approval_delegations (recipient_id, delegate, ends_at);
     `);
