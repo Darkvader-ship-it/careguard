@@ -28,6 +28,7 @@
 
 import "dotenv/config";
 import { fileURLToPath } from "url";
+import { dirname } from "path";
 import {
   readFileSync,
   writeFileSync,
@@ -55,6 +56,7 @@ import {
   Operation,
   Asset,
   Horizon,
+  Account,
 } from "@stellar/stellar-sdk";
 import {
   wrapFetchWithPayment,
@@ -103,6 +105,40 @@ import {
   createMockReceipt,
   isMockNetwork,
 } from "../shared/network-mode.ts";
+import {
+  checkMedicationAllergies,
+  loadRecipientAllergies,
+  addRecipientAllergy,
+  removeRecipientAllergy,
+  type AllergyCheckResult,
+} from "../shared/allergies.ts";
+import {
+  type RecipientAllergy,
+  type MultisigConfig,
+  type MultisigPendingRequest,
+} from "../shared/types.ts";
+import {
+  isMultisigRequired,
+  createMultisigRequest,
+  loadMultisigConfig,
+  saveMultisigConfig,
+  loadMultisigRequests,
+  signAndSubmitMultisigRequest,
+  rejectMultisigRequest,
+} from "../shared/multisig.ts";
+import {
+  getMedicationHistory,
+  recordDosageChange,
+  getActiveDosageAtTime,
+} from "../shared/medication-history.ts";
+import {
+  runPriceWatchForRecipient,
+  type PriceWatchResult,
+} from "./price-watch.ts";
+import {
+  extractLineItemsFromBillImage,
+  type OcrExtractionResult,
+} from "../shared/bill-ocr.ts";
 
 assertMockNetworkAllowed();
 
@@ -1008,6 +1044,10 @@ export function loadSpending(recipientId?: string): SpendingTracker {
  */
 export function appendTransaction(tx: Transaction, recipientId?: string): void {
   const logFile = getTransactionLogFile(recipientId);
+  const dir = dirname(logFile);
+  if (!existsSync(dir)) {
+    mkdirSync(dir, { recursive: true });
+  }
   appendFileSync(logFile, JSON.stringify(tx) + "\n", "utf-8");
 
   // Compact into a snapshot every SNAPSHOT_INTERVAL transactions
@@ -2211,27 +2251,115 @@ export async function processPendingTransactions() {
 
 // --- Tool: Pay for medication via MPP Charge (real Stellar payment) ---
 export async function payForMedication(
-  pharmacyId: string,
-  pharmacyName: string,
-  drugName: string,
-  amount: number,
+  arg1: string,
+  arg2: string | number,
+  arg3: string,
+  arg4?: number | string,
   skipApproval: boolean = false,
   daysSupply: number = 30,
   memo?: string,
   _recipientId?: string,
 ) {
+  let pharmacyId: string;
+  let pharmacyName: string;
+  let drugName: string;
+  let amount: number;
+  let targetRecipientId: string;
+
+  if (typeof arg2 === "number") {
+    // Dual signature support: payForMedication(drugName, amount, pharmacyName, recipientId)
+    drugName = arg1;
+    amount = arg2;
+    pharmacyName = arg3;
+    pharmacyId = pharmacyName.toLowerCase().replace(/\s+/g, "-");
+    targetRecipientId = typeof arg4 === "string" ? arg4 : currentRecipientId;
+  } else {
+    // Standard signature: payForMedication(pharmacyId, pharmacyName, drugName, amount, skipApproval, daysSupply, _recipientId)
+    pharmacyId = arg1;
+    pharmacyName = arg2;
+    drugName = arg3;
+    amount = typeof arg4 === "number" ? arg4 : 0;
+    targetRecipientId = _recipientId ?? currentRecipientId;
+  }
+
   if (!Number.isFinite(amount) || amount <= 0 || amount > MAX_PAYMENT) {
     return {
       success: false,
       error: `Invalid payment amount: $${amount}. Amount must be a positive finite number <= $${MAX_PAYMENT}.`,
     };
   }
+  // Check multi-sig authorization (Issue #1226) - custody-level check beyond single-key caps & policy checks
+  const multisigConfig = loadMultisigConfig(targetRecipientId);
+  const multisigNeeded = isMultisigRequired(amount, targetRecipientId);
+  if (multisigNeeded && (multisigConfig.coSignerPublicKey || multisigConfig.coSigners.length > 0)) {
+    const msigReq = await createMultisigRequest({
+      recipientId: targetRecipientId,
+      type: "medication",
+      description: `${drugName} from ${pharmacyName}`,
+      amount,
+      recipientAddress: pharmacyId,
+      destinationWallet: pharmacyId,
+      envelopeXdr: Buffer.from(
+        JSON.stringify({ pharmacyId, pharmacyName, drugName, amount }),
+      ).toString("base64"),
+      requiredSigner: multisigConfig.coSignerPublicKey || multisigConfig.coSigners[0],
+      windowMinutes: multisigConfig.windowMinutes,
+    });
+
+    const tx: Transaction & { pendingUntil?: string; submittedAt?: string } = {
+      id: `tx-${Date.now()}`,
+      timestamp: new Date().toISOString(),
+      type: "medication" as const,
+      description: `${drugName} from ${pharmacyName} [Awaiting Co-Signer Multi-Sig]`,
+      amount,
+      recipient: pharmacyId,
+      status: "pending" as const,
+      category: TRANSACTION_CATEGORY.MEDICATIONS,
+      pendingUntil: msigReq.expiresAt,
+      submittedAt: new Date().toISOString(),
+    };
+    spendingTracker.transactions.push(tx);
+    agentTransactionsTotal.inc({ status: "pending" });
+    appendTransaction(tx, targetRecipientId);
+
+    return {
+      success: false,
+      multisigPending: true,
+      requestId: msigReq.id,
+      requiredSignatures: 2,
+      status: "pending_cosignature",
+      requiredSigner: msigReq.requiredSigner,
+      expiresAt: msigReq.expiresAt,
+      message: `Payment of $${amount.toFixed(2)} exceeds threshold of $${multisigConfig.thresholdAmount.toFixed(2)}. Multi-signature authorization required.`,
+      error: `REQUIRES CO-SIGNER MULTI-SIG: $${amount.toFixed(2)} exceeds multi-sig threshold ($${multisigConfig.thresholdAmount.toFixed(2)}). Order requires co-caregiver signature in Wallet tab.`,
+      transaction: tx,
+    };
+  }
+
   if (amount > getPlatformTxCap()) {
     return {
       success: false,
       error: `BLOCKED BY PLATFORM CAP: $${amount.toFixed(2)} exceeds MAX_SINGLE_TX_USDC ($${getPlatformTxCap().toFixed(2)})`,
     };
   }
+
+  // Check recipient allergies (Issue #1230)
+  const allergyCheck = checkMedicationAllergies(drugName, targetRecipientId);
+  if (allergyCheck.blocked) {
+    const primaryConflict = allergyCheck.conflicts.find(
+      (c) => c.severity === "severe" || c.severity === "life_threatening",
+    );
+    logger.warn(
+      { drugName, recipientId: targetRecipientId, conflict: primaryConflict },
+      "[allergy-check] payment blocked due to severe allergy contraindication",
+    );
+    return {
+      success: false,
+      blocked: true,
+      reason: "ALLERGY_CONTRAINDICATION",
+      error: `BLOCKED BY ALLERGY GUARD: Patient has documented ${primaryConflict?.severity.replace("_", "-")} allergy to ${primaryConflict?.allergy.substance}. Cannot order ${drugName}.`,
+      conflicts: allergyCheck.conflicts,
+    };
   // Validate optional memo: Stellar MEMO_TEXT is limited to 28 bytes.
   if (memo !== undefined) {
     const memoBytes = Buffer.byteLength(memo, "utf8");
@@ -2242,6 +2370,7 @@ export async function payForMedication(
       };
     }
   }
+
   // Atomically check policy and reserve the budget before the async payment
   // check when only one slot remains in the budget.
   const release = await getBudgetMutex(currentRecipientId).acquire();
@@ -2303,6 +2432,7 @@ export async function payForMedication(
         budgetContext,
       };
     }
+
     if (policyCheck.requiresApproval && !skipApproval) {
       policyBlocksTotal.inc({ reason: "approval_required" });
       const holdSeconds = (currentPolicy as any)?.holdTimeSeconds ?? 0;
@@ -2489,20 +2619,113 @@ async function buildAndSubmitUsdcPayment(
 
 // --- Tool: Pay a medical bill via real Stellar USDC transfer ---
 export async function payBill(
-  providerId: string,
-  providerName: string,
-  description: string,
-  amount: number,
+  arg1: string,
+  arg2: string | number,
+  arg3: string,
+  arg4?: number | string,
   skipApproval: boolean = false,
   memo?: string,
   _recipientId?: string,
 ) {
+  let providerId: string;
+  let providerName: string;
+  let description: string;
+  let amount: number;
+  let targetRecipientId: string;
+
+  if (typeof arg2 === "number") {
+    // Dual signature support: payBill(providerId/destination, amount, description, recipientId)
+    providerId = arg1;
+    amount = arg2;
+    description = arg3;
+    providerName = description;
+    targetRecipientId = typeof arg4 === "string" ? arg4 : currentRecipientId;
+  } else {
+    // Standard signature: payBill(providerId, providerName, description, amount, skipApproval, _recipientId)
+    providerId = arg1;
+    providerName = arg2;
+    description = arg3;
+    amount = typeof arg4 === "number" ? arg4 : 0;
+    targetRecipientId = _recipientId || currentRecipientId;
+  }
+
   if (!Number.isFinite(amount) || amount <= 0 || amount > MAX_PAYMENT) {
     return {
       success: false,
       error: `Invalid payment amount: $${amount}. Amount must be a positive finite number <= $${MAX_PAYMENT}.`,
     };
   }
+  // Check multi-sig authorization (Issue #1226) - custody-level check beyond single-key caps & policy checks
+  const multisigConfig = loadMultisigConfig(targetRecipientId);
+  const multisigNeeded = isMultisigRequired(amount, targetRecipientId);
+  if (multisigNeeded && (multisigConfig.coSignerPublicKey || multisigConfig.coSigners.length > 0)) {
+    let envelopeXdr: string = "";
+    try {
+      const account = new Account(agentKeypair.publicKey(), "100");
+      const usdcAsset = new Asset("USDC", USDC_ISSUER);
+      const paymentOp = Operation.payment({
+        destination: providerId,
+        asset: usdcAsset,
+        amount: amount.toFixed(7),
+      });
+      const fee = "100";
+      const builder = new TransactionBuilder(account, {
+        fee,
+        networkPassphrase: STELLAR_NETWORK_PASSPHRASE,
+      });
+      builder.addOperation(paymentOp);
+      builder.setTimeout((multisigConfig.windowMinutes || 1440) * 60);
+      const built = builder.build();
+      built.sign(agentKeypair);
+      envelopeXdr = built.toXDR();
+    } catch {
+      envelopeXdr = Buffer.from(
+        JSON.stringify({ recipientKey: providerId, providerName, amount, description }),
+      ).toString("base64");
+    }
+
+    const msigReq = await createMultisigRequest({
+      recipientId: targetRecipientId,
+      type: "bill",
+      description: `${description} — ${providerName}`,
+      amount,
+      destinationWallet: providerId,
+      recipientAddress: providerId,
+      envelopeXdr,
+      requiredSigner: multisigConfig.coSignerPublicKey || multisigConfig.coSigners[0],
+      windowMinutes: multisigConfig.windowMinutes,
+    });
+
+    const tx: Transaction & { pendingUntil?: string; submittedAt?: string } = {
+      id: `tx-${Date.now()}`,
+      timestamp: new Date().toISOString(),
+      type: "bill" as const,
+      description: `${description} — ${providerName} [Awaiting Co-Signer Multi-Sig]`,
+      amount,
+      recipient: providerId,
+      status: "pending" as const,
+      category: TRANSACTION_CATEGORY.BILLS,
+      pendingUntil: msigReq.expiresAt,
+      submittedAt: new Date().toISOString(),
+    };
+    spendingTracker.transactions.push(tx);
+    agentTransactionsTotal.inc({ status: "pending" });
+    appendTransaction(tx, targetRecipientId);
+
+    return {
+      success: false,
+      multisigPending: true,
+      requestId: msigReq.id,
+      requiredSignatures: 2,
+      status: "pending_cosignature",
+      requiredSigner: msigReq.requiredSigner,
+      expiresAt: msigReq.expiresAt,
+      message: `Payment of $${amount.toFixed(2)} exceeds threshold of $${multisigConfig.thresholdAmount.toFixed(2)}. Multi-signature authorization required.`,
+      error: `REQUIRES CO-SIGNER MULTI-SIG: $${amount.toFixed(2)} exceeds multi-sig threshold ($${multisigConfig.thresholdAmount.toFixed(2)}). Transaction envelope generated awaiting co-caregiver signature in Wallet tab.`,
+      transaction: tx,
+    };
+  }
+
   if (amount > getPlatformTxCap()) {
     return {
       success: false,
@@ -2561,6 +2784,7 @@ export async function payBill(
         transaction: tx,
       };
     }
+
     if (billPolicyCheck.requiresApproval && !skipApproval) {
       policyBlocksTotal.inc({ reason: "approval_required" });
       const holdSeconds = (currentPolicy as any)?.holdTimeSeconds ?? 0;
@@ -3400,3 +3624,55 @@ const spendingCacheRefreshTimer = setInterval(() => {
   }
 }, SPENDING_CACHE_TTL_MS);
 spendingCacheRefreshTimer.unref?.();
+
+// ── Multi-Signature Custody Exports (Issue #1226) ────────────────────────────
+
+export function getRecipientMultisigConfig(recipientId?: string): MultisigConfig {
+  return loadMultisigConfig(recipientId || currentRecipientId);
+}
+
+export function updateRecipientMultisigConfig(
+  config: Partial<MultisigConfig>,
+  recipientId?: string,
+): MultisigConfig {
+  return saveMultisigConfig(recipientId || currentRecipientId, config);
+}
+
+export function getRecipientMultisigRequests(
+  recipientId?: string,
+): MultisigPendingRequest[] {
+  return loadMultisigRequests(recipientId || currentRecipientId);
+}
+
+export async function authorizeMultisigPayment(
+  requestId: string,
+  coSignerSecretKey?: string,
+  signedXdr?: string,
+  recipientId?: string,
+) {
+  return await signAndSubmitMultisigRequest({
+    requestId,
+    recipientId: recipientId || currentRecipientId,
+    coSignerSecretKey,
+    signedXdr,
+    horizonServer,
+    networkPassphrase: STELLAR_NETWORK_PASSPHRASE,
+  });
+}
+
+export function rejectMultisigPayment(
+  requestId: string,
+  reason?: string,
+  recipientId?: string,
+) {
+  return rejectMultisigRequest(requestId, recipientId || currentRecipientId, reason);
+}
+
+// ── Medication History Exports (Issue #1227) ─────────────────────────────────
+
+export {
+  getMedicationHistory,
+  recordDosageChange,
+  getActiveDosageAtTime,
+};
+

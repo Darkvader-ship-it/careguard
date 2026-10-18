@@ -15,6 +15,21 @@
 
 import { z } from "zod";
 
+// ── Dosage History (Issue #1227) ─────────────────────────────────────────────
+
+export const DosageHistoryEntrySchema = z.object({
+  id: z.string().min(1),
+  previousDosage: z.string().min(1),
+  previousFrequency: z.string().min(1),
+  newDosage: z.string().min(1),
+  newFrequency: z.string().min(1),
+  changedAt: z.string().min(1),
+  reason: z.string().optional(),
+  prescriber: z.string().optional(),
+});
+
+export type DosageHistoryEntry = z.infer<typeof DosageHistoryEntrySchema>;
+
 // ── Medication ────────────────────────────────────────────────────────────────
 
 export const MedicationSchema = z.object({
@@ -24,6 +39,7 @@ export const MedicationSchema = z.object({
   currentPharmacy: z.string().optional(),
   currentPrice: z.number().nonnegative().optional(),
   nextRefillDate: z.string().optional(),
+  dosageHistory: z.array(DosageHistoryEntrySchema).optional().default([]),
 });
 
 export type Medication = z.infer<typeof MedicationSchema>;
@@ -353,3 +369,114 @@ export const AlertSchema = z.object({
 });
 
 export type Alert = z.infer<typeof AlertSchema>;
+
+// ── Multi-Signature Custody (Issue #1226) ────────────────────────────────────
+
+export const MultisigConfigSchema = z.object({
+  recipientId: z.string().optional(),
+  enabled: z.boolean().default(false),
+  coSignerPublicKey: z.string().optional(),
+  coSigners: z.array(z.string()).default([]),
+  thresholdAmount: z.number().positive().default(50),
+  windowMinutes: z.number().int().positive().default(1440),
+  timeWindowHours: z.number().positive().default(24),
+});
+
+export type MultisigConfig = z.infer<typeof MultisigConfigSchema>;
+
+export const MultisigRequestSchema = z.object({
+  id: z.string().min(1),
+  recipientId: z.string().min(1),
+  type: z.enum(["medication", "bill"]),
+  description: z.string(),
+  amount: z.number().positive(),
+  recipientAddress: z.string().optional(),
+  destinationWallet: z.string().optional(),
+  asset: z.string().default("USDC"),
+  envelopeXdr: z.string(),
+  requiredSigner: z.string().optional(),
+  requiredSignatures: z.number().default(2),
+  collectedSignatures: z.array(z.string()).default([]),
+  status: z.enum([
+    "pending",
+    "pending_signature",
+    "submitted",
+    "completed",
+    "rejected",
+    "expired",
+  ]),
+  createdAt: z.string(),
+  expiresAt: z.string(),
+  stellarTxHash: z.string().optional(),
+  txHash: z.string().optional(),
+  error: z.string().optional(),
+  rejectionReason: z.string().optional(),
+});
+
+export type MultisigPendingRequest = z.infer<typeof MultisigRequestSchema>;
+
+// ── Recipient Data Export (Issue #1225) ───────────────────────────────────────
+
+export const RecipientExportBundleSchema = z.object({
+  exportMetadata: z.object({
+    exportedAt: z.string(),
+    version: z.string(),
+    recipientId: z.string(),
+    format: z.string(),
+  }),
+  recipient: z.object({
+    id: z.string(),
+    name: z.string(),
+    age: z.number().nullable(),
+    primaryDoctor: z.string().nullable(),
+    insurance: z.string().nullable(),
+  }),
+  medications: z.array(MedicationSchema),
+  policy: SpendingPolicySchema,
+  transactions: z.array(
+    z.object({
+      id: z.string(),
+      timestamp: z.string(),
+      type: z.string(),
+      description: z.string(),
+      amount: z.number(),
+      recipient: z.string(),
+      stellarTxHash: z.string().optional(),
+      status: z.string(),
+      category: z.string(),
+    }),
+  ),
+  orders: z.array(
+    z.object({
+      orderId: z.string().optional(),
+      drug: z.string(),
+      pharmacy: z.string(),
+      amount: z.number(),
+      status: z.string().optional(),
+      createdAt: z.string().optional(),
+      stellarTxHash: z.string().optional(),
+    }),
+  ),
+  allergies: z.array(RecipientAllergySchema),
+  adherence: z.array(
+    z.object({
+      drug: z.string(),
+      dosage: z.string().optional(),
+      pharmacy: z.string(),
+      dueDate: z.string(),
+      status: z.string(),
+      confirmedAt: z.string().optional(),
+    }),
+  ),
+  notes: z.array(
+    z.object({
+      id: z.string().optional(),
+      title: z.string().optional(),
+      content: z.string(),
+      createdAt: z.string(),
+    }),
+  ).optional().default([]),
+});
+
+export type RecipientExportBundle = z.infer<typeof RecipientExportBundleSchema>;
+

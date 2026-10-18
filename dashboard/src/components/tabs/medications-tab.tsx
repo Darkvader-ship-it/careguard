@@ -16,6 +16,7 @@ import { InteractionHistorySection } from "../interaction-history-section";
 import { getTranslations, type Locale } from "../../i18n";
 import { AGENT_URL } from "../../lib/agent-url";
 import { agentFetch } from "../../lib/agent-fetch";
+import { ContextualHelp } from "../primitives/contextual-help";
 
 const DEFAULT_MEDS = ["Lisinopril", "Metformin", "Atorvastatin", "Amlodipine"] as const;
 
@@ -71,26 +72,103 @@ export function MedicationsTab({
   const [candidateMed, setCandidateMed] = useState("");
   const [optOutMeds, setOptOutMeds] = useState<string[]>([]);
 
+  // --- Medication Dosage History State & Actions (Issue #1227) ---
+  const [dosageHistory, setDosageHistory] = useState<any[]>([]);
+  const [loadingHistory, setLoadingHistory] = useState(false);
+  const [expandedHistoryDrug, setExpandedHistoryDrug] = useState<string | null>(null);
+  const [adjustingDrug, setAdjustingDrug] = useState<string | null>(null);
+  const [newDosageInput, setNewDosageInput] = useState("");
+  const [newFrequencyInput, setNewFrequencyInput] = useState("");
+  const [dosageReasonInput, setDosageReasonInput] = useState("");
+  const [prescriberInput, setPrescriberInput] = useState("");
+  const [savingDosage, setSavingDosage] = useState(false);
+
   // Fetch allergies from backend on load
   useEffect(() => {
+    let isMounted = true;
     async function fetchAllergies() {
       try {
+        if (!isMounted) return;
         setLoadingAllergies(true);
         const res = await agentFetch(`${AGENT_URL}/agent/allergies?recipient_id=rosa`);
-        if (res.ok) {
+        if (res.ok && isMounted) {
           const data = await res.json();
-          if (Array.isArray(data.allergies) && data.allergies.length > 0) {
+          if (Array.isArray(data.allergies) && data.allergies.length > 0 && isMounted) {
             setAllergies(data.allergies);
           }
         }
       } catch {
         // Fall back to local default state
       } finally {
-        setLoadingAllergies(false);
+        if (isMounted) setLoadingAllergies(false);
       }
     }
+
+    async function fetchDosageHistory() {
+      try {
+        if (!isMounted) return;
+        setLoadingHistory(true);
+        const res = await agentFetch(`${AGENT_URL}/agent/medications/history?recipient_id=rosa`);
+        if (res.ok && isMounted) {
+          const data = await res.json();
+          if (Array.isArray(data.history) && isMounted) {
+            setDosageHistory(data.history);
+          }
+        }
+      } catch {
+        // Fallback
+      } finally {
+        if (isMounted) setLoadingHistory(false);
+      }
+    }
+
     fetchAllergies();
+    fetchDosageHistory();
+
+    return () => {
+      isMounted = false;
+    };
   }, []);
+
+  const handleSaveDosageChange = async (drugName: string) => {
+    if (!newDosageInput.trim() || !newFrequencyInput.trim()) {
+      toast.error("Dosage and frequency are required");
+      return;
+    }
+    setSavingDosage(true);
+    try {
+      const res = await agentFetch(`${AGENT_URL}/agent/medications/dosage`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          recipientId: "rosa",
+          medicationName: drugName,
+          newDosage: newDosageInput.trim(),
+          newFrequency: newFrequencyInput.trim(),
+          reason: dosageReasonInput.trim() || undefined,
+          prescriber: prescriberInput.trim() || undefined,
+        }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data.entry) {
+          setDosageHistory((prev) => [data.entry, ...prev]);
+        }
+        toast.success(`Recorded new dosage for ${drugName}`);
+        setAdjustingDrug(null);
+        setNewDosageInput("");
+        setNewFrequencyInput("");
+        setDosageReasonInput("");
+        setPrescriberInput("");
+      } else {
+        toast.error("Failed to save dosage change");
+      }
+    } catch {
+      toast.error("Network error while recording dosage change");
+    } finally {
+      setSavingDosage(false);
+    }
+  };
 
   // Save new allergy
   const handleAddAllergy = async (e: React.FormEvent) => {
@@ -198,9 +276,12 @@ export function MedicationsTab({
       <div className="bg-white rounded-xl border border-slate-200 p-6">
         <div className="flex items-center justify-between mb-4">
           <div>
-            <h2 className="text-sm font-semibold text-slate-700">{t.title}</h2>
+            <div className="flex items-center gap-2">
+              <h2 className="text-sm font-semibold text-slate-700">{t.title}</h2>
+              <ContextualHelp topicKey="dosage_history" caregiverId="caregiver" />
+            </div>
             <p className="text-xs text-slate-500 mt-0.5">
-              Active recurring medications with automated price watch monitoring
+              Active recurring medications with automated price watch monitoring & versioned dosage history
             </p>
           </div>
           <div className="flex flex-col items-end gap-1">
@@ -243,7 +324,7 @@ export function MedicationsTab({
           </div>
         </div>
 
-        <div className="space-y-3">
+        <div className="space-y-4">
           {DEFAULT_MEDS.map((drug) => {
             const r = agentResult?.toolCalls.find(
               (tc) =>
@@ -252,11 +333,80 @@ export function MedicationsTab({
             )?.result;
             const isOptedOut = optOutMeds.includes(drug);
 
+            const drugHistory = dosageHistory.filter(
+              (h) => h.medicationName?.toLowerCase() === drug.toLowerCase(),
+            );
+            const activeEntry = drugHistory[0];
+            const activeDosage = activeEntry?.newDosage || "Standard Dose";
+            const activeFrequency = activeEntry?.newFrequency || "Daily";
+            const isAdjusting = adjustingDrug === drug;
+            const isHistoryExpanded = expandedHistoryDrug === drug;
+
             return (
               <div
                 key={drug}
-                className="flex items-center justify-between p-4 bg-slate-50 rounded-lg border border-slate-100"
+                className="p-4 bg-slate-50 rounded-lg border border-slate-100 space-y-3"
               >
+                <div className="flex items-center justify-between">
+                  <div>
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="font-semibold text-sm text-slate-800">{drug}</span>
+                      <span className="text-[11px] font-mono px-2 py-0.5 bg-white border border-slate-200 text-slate-700 rounded-md font-medium">
+                        {activeDosage} • {activeFrequency}
+                      </span>
+                      <button
+                        onClick={() => toggleOptOut(drug)}
+                        title={isOptedOut ? "Click to enable price alerts" : "Click to opt out of price alerts"}
+                        className={`text-[10px] px-2 py-0.5 rounded-full border transition-all cursor-pointer ${
+                          isOptedOut
+                            ? "bg-slate-100 text-slate-500 border-slate-200"
+                            : "bg-emerald-50 text-emerald-700 border-emerald-200"
+                        }`}
+                      >
+                        {isOptedOut ? "🔕 Price Watch Off" : "🔔 Price Watch Active"}
+                      </button>
+                    </div>
+                    <div className={r ? "text-xs text-slate-500 mt-1" : "text-xs text-slate-400 italic mt-1"}>
+                      {r
+                        ? `${t.best}: ${r.cheapest.pharmacyName} at $${r.cheapest.price}`
+                        : t.notYetCompared}
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    {r && (
+                      <div className="text-right mr-2 hidden sm:block">
+                        <div className="text-sm font-semibold text-green-600">
+                          {t.save} ${r.potentialSavings}/mo
+                        </div>
+                        <div className="text-xs text-slate-400">
+                          {r.savingsPercent}% {t.savings}
+                        </div>
+                      </div>
+                    )}
+                    <button
+                      onClick={() => {
+                        if (isAdjusting) {
+                          setAdjustingDrug(null);
+                        } else {
+                          setAdjustingDrug(drug);
+                          setNewDosageInput(activeEntry?.newDosage || "");
+                          setNewFrequencyInput(activeEntry?.newFrequency || "");
+                          setDosageReasonInput("");
+                          setPrescriberInput("");
+                        }
+                      }}
+                      className="px-2.5 py-1 text-xs font-medium text-sky-700 bg-sky-50 hover:bg-sky-100 rounded-lg cursor-pointer transition-colors"
+                    >
+                      {isAdjusting ? "Cancel" : "Adjust Dose"}
+                    </button>
+                    <button
+                      onClick={() =>
+                        setExpandedHistoryDrug(isHistoryExpanded ? null : drug)
+                      }
+                      className="px-2.5 py-1 text-xs text-slate-600 bg-white border border-slate-200 hover:bg-slate-100 rounded-lg cursor-pointer transition-colors"
+                    >
+                      History ({drugHistory.length})
+                    </button>
                 <div>
                   <div className="font-medium text-sm flex items-center gap-2">
                     {drug}
@@ -288,14 +438,135 @@ export function MedicationsTab({
                       : t.notYetCompared}
                   </div>
                 </div>
-                {r && (
-                  <div className="text-right">
-                    <div className="text-sm font-semibold text-green-600">
-                      {t.save} ${r.potentialSavings}/mo
+
+                {/* Adjust Dose Form (Issue #1227) */}
+                {isAdjusting && (
+                  <div className="p-3 bg-white rounded-lg border border-sky-200 space-y-2 mt-2">
+                    <div className="text-xs font-semibold text-sky-900 flex items-center justify-between">
+                      <span>Record Provider Dosage Adjustment for {drug}</span>
+                      <span className="text-[10px] text-slate-400">Versioned • Immutable</span>
                     </div>
-                    <div className="text-xs text-slate-400">
-                      {r.savingsPercent}% {t.savings}
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
+                      <div>
+                        <label className="block text-slate-600 text-[11px] mb-0.5">
+                          New Dosage *
+                        </label>
+                        <input
+                          type="text"
+                          placeholder="e.g. 20mg"
+                          value={newDosageInput}
+                          onChange={(e) => setNewDosageInput(e.target.value)}
+                          className="w-full px-2.5 py-1.5 border border-slate-300 rounded focus:outline-none focus:ring-1 focus:ring-sky-500"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-slate-600 text-[11px] mb-0.5">
+                          New Frequency *
+                        </label>
+                        <input
+                          type="text"
+                          placeholder="e.g. Once daily in morning"
+                          value={newFrequencyInput}
+                          onChange={(e) => setNewFrequencyInput(e.target.value)}
+                          className="w-full px-2.5 py-1.5 border border-slate-300 rounded focus:outline-none focus:ring-1 focus:ring-sky-500"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-slate-600 text-[11px] mb-0.5">
+                          Reason for adjustment (optional)
+                        </label>
+                        <input
+                          type="text"
+                          placeholder="e.g. Doctor increased due to elevated BP reading"
+                          value={dosageReasonInput}
+                          onChange={(e) => setDosageReasonInput(e.target.value)}
+                          className="w-full px-2.5 py-1.5 border border-slate-300 rounded focus:outline-none focus:ring-1 focus:ring-sky-500"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-slate-600 text-[11px] mb-0.5">
+                          Prescribing Physician (optional)
+                        </label>
+                        <input
+                          type="text"
+                          placeholder="e.g. Dr. Sarah Chen, MD"
+                          value={prescriberInput}
+                          onChange={(e) => setPrescriberInput(e.target.value)}
+                          className="w-full px-2.5 py-1.5 border border-slate-300 rounded focus:outline-none focus:ring-1 focus:ring-sky-500"
+                        />
+                      </div>
                     </div>
+                    <div className="flex justify-end gap-2 pt-1">
+                      <button
+                        type="button"
+                        onClick={() => setAdjustingDrug(null)}
+                        className="px-3 py-1 text-xs text-slate-600 hover:bg-slate-100 rounded cursor-pointer"
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleSaveDosageChange(drug)}
+                        disabled={savingDosage}
+                        className="px-3 py-1 text-xs font-medium text-white bg-sky-600 hover:bg-sky-700 disabled:opacity-50 rounded cursor-pointer transition-colors"
+                      >
+                        {savingDosage ? "Saving..." : "Save Dosage Version"}
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {/* Expandable History Timeline (Issue #1227) */}
+                {isHistoryExpanded && (
+                  <div className="p-3 bg-white rounded-lg border border-slate-200 mt-2 space-y-2">
+                    <div className="flex items-center justify-between border-b border-slate-100 pb-1.5">
+                      <span className="text-xs font-semibold text-slate-700">
+                        Dosage & Frequency History for {drug}
+                      </span>
+                      <span className="text-[10px] text-slate-400">
+                        Historical adherence calculates from active dosage at dose timestamp
+                      </span>
+                    </div>
+                    {drugHistory.length === 0 ? (
+                      <div className="text-xs text-slate-500 italic py-2 text-center">
+                        No dosage adjustments recorded. Rosa is taking her initial prescription baseline.
+                      </div>
+                    ) : (
+                      <div className="space-y-2 pt-1">
+                        {drugHistory.map((h, idx) => (
+                          <div
+                            key={h.id || `${h.medicationName}-${h.changedAt}-${idx}`}
+                            className="p-2.5 bg-slate-50 rounded border border-slate-100 text-xs space-y-1"
+                          >
+                            <div className="flex items-center justify-between flex-wrap gap-1">
+                              <span className="font-semibold text-slate-800">
+                                {h.previousDosage ? `${h.previousDosage} (${h.previousFrequency || "daily"})` : "Initial Prescription"} →{" "}
+                                <span className="text-sky-700 font-bold">{h.newDosage} ({h.newFrequency})</span>
+                              </span>
+                              <span className="text-[10px] text-slate-500">
+                                {new Date(h.changedAt).toLocaleDateString(undefined, {
+                                  year: "numeric",
+                                  month: "short",
+                                  day: "numeric",
+                                  hour: "2-digit",
+                                  minute: "2-digit",
+                                })}
+                              </span>
+                            </div>
+                            {h.reason && (
+                              <p className="text-slate-600 text-[11px]">
+                                <strong className="text-slate-700">Reason:</strong> {h.reason}
+                              </p>
+                            )}
+                            {h.prescriber && (
+                              <p className="text-slate-500 text-[10px]">
+                                Prescribed by: {h.prescriber}
+                              </p>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    )}
                   </div>
                 )}
               </div>
@@ -506,9 +777,12 @@ export function MedicationsTab({
         <div className="bg-white rounded-xl border border-slate-200 p-6">
           <div className="flex items-center justify-between mb-4">
             <div>
-              <h2 className="text-sm font-semibold text-slate-700">
-                {t.drugInteractions}
-              </h2>
+              <div className="flex items-center gap-2">
+                <h2 className="text-sm font-semibold text-slate-700">
+                  {t.drugInteractions}
+                </h2>
+                <ContextualHelp topicKey="drug_interaction_warning" caregiverId="caregiver" />
+              </div>
               <p className="text-xs text-slate-500 mt-0.5">
                 Drug-to-drug interactions (independent of personal allergy contraindications)
               </p>

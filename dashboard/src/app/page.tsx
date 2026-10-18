@@ -123,7 +123,6 @@ export default function Dashboard() {
             onCancelTask={state.cancelAgentTask}
             recipient={recipient}
             locale={locale}
-            locale={DEFAULT_LOCALE}
           />
         )}
         {activeTab === "medications" && (

@@ -65,6 +65,7 @@ export function SettingsTab({
   const [showUnsavedDialog, setShowUnsavedDialog] = useState(false);
   const [pendingNavigation, setPendingNavigation] = useState(false);
   const [postSaveChangedFields, setPostSaveChangedFields] = useState<string[] | null>(null);
+  const [exporting, setExporting] = useState(false);
   const [notificationPrefs, setNotificationPrefs] = useState(DEFAULT_NOTIFICATION_PREFERENCES);
 
   // --- Recipient Allergies State & Handlers (Issue #1230) ---
@@ -149,6 +150,35 @@ export function SettingsTab({
     setToastMsg(`Removed allergy: ${name}`);
   };
 
+  const handleDownloadData = async () => {
+    try {
+      setExporting(true);
+      const res = await agentFetch(`${AGENT_URL}/recipients/${recipientId}/export`);
+      if (!res.ok) {
+        if (res.status === 429) {
+          setToastMsg("Export rate limit reached. Please wait a few minutes before trying again.");
+          return;
+        }
+        setToastMsg("Failed to download recipient data export.");
+        return;
+      }
+      const blob = await res.blob();
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `careguard-export-${recipientId}-${new Date().toISOString().slice(0, 10)}.json`;
+      document.body.appendChild(a);
+      a.click();
+      window.URL.revokeObjectURL(url);
+      document.body.removeChild(a);
+      setToastMsg(`Downloaded full data export for ${recipient.name}`);
+    } catch {
+      setToastMsg("Network error during data takeout.");
+    } finally {
+      setExporting(false);
+    }
+  };
+
   const [form, setForm] = useState({
     recipientName: "",
     recipientAge: "",
@@ -175,7 +205,7 @@ export function SettingsTab({
 
   const hasUnsavedChanges = editing && JSON.stringify(form) !== JSON.stringify(initialForm);
 
-  const changedFields = Object.keys(initialForm).filter(
+  const changedFields = (Object.keys(initialForm) as Array<keyof typeof form>).filter(
     (key) => form[key] !== initialForm[key]
   );
 
@@ -261,7 +291,7 @@ export function SettingsTab({
   const handleSave = async () => {
     setSaving(true);
     // Capture which fields changed before saving
-    const changedBeforeSave = Object.keys(initialForm).filter(
+    const changedBeforeSave = (Object.keys(initialForm) as Array<keyof typeof form>).filter(
       (key) => form[key] !== initialForm[key]
     );
     // Trim, de-duplicate, and filter empty medication entries
@@ -724,7 +754,9 @@ export function SettingsTab({
               {postSaveChangedFields.map((field) => (
                 <li key={field} className="flex items-center">
                   <span className="text-slate-500 mr-2">{field}:</span>
-                  <span className="font-mono">{initialForm[field] || ""} → {form[field] || ""}</span>
+                  <span className="font-mono">
+                    {initialForm[field as keyof typeof form] || ""} → {form[field as keyof typeof form] || ""}
+                  </span>
                 </li>
               ))}
             </ul>
@@ -782,6 +814,44 @@ export function SettingsTab({
               )}
             </div>
           </div>
+        </div>
+      </div>
+
+      {/* ── Data Portability & GDPR Takeout (Issue #1225) ── */}
+      <div className="bg-white rounded-xl border border-slate-200 p-6">
+        <div className="flex items-start justify-between gap-4 flex-wrap sm:flex-nowrap">
+          <div>
+            <h2 className="text-sm font-semibold text-slate-700">Data Portability & Takeout</h2>
+            <p className="text-xs text-slate-500 mt-1 max-w-xl">
+              Download a complete, portable archive of {recipient.name}&apos;s healthcare records, medications with dosage change history, spending policy, transactions, orders, and clinical notes (GDPR-style data takeout).
+            </p>
+          </div>
+          <button
+            onClick={handleDownloadData}
+            disabled={exporting}
+            className="shrink-0 px-4 py-2 bg-slate-900 text-white hover:bg-slate-800 disabled:opacity-50 text-xs font-medium rounded-lg cursor-pointer transition-all flex items-center gap-1.5"
+          >
+            <svg
+              xmlns="http://www.w3.org/2000/svg"
+              fill="none"
+              viewBox="0 0 24 24"
+              strokeWidth={1.5}
+              stroke="currentColor"
+              className="w-4 h-4"
+              aria-hidden="true"
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5M16.5 12L12 16.5m0 0L7.5 12m4.5 4.5V3"
+              />
+            </svg>
+            {exporting ? "Preparing Export…" : "Download my data"}
+          </button>
+        </div>
+        <div className="mt-4 pt-3 border-t border-slate-100 flex items-center justify-between text-[11px] text-slate-400 flex-wrap gap-2">
+          <span>Standardized JSON bundle • Internal system keys excluded</span>
+          <span>Rate-limited & tamper-evident audit logged</span>
         </div>
       </div>
     </div>
