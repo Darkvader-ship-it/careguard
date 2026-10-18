@@ -4,7 +4,8 @@ import { useState, useEffect } from "react";
 import { copyText } from "../../lib/clipboard";
 import { truncateAddress } from "../../lib/utils";
 import { Toast } from "../primitives/toast";
-import type { AgentInfo } from "../types";
+import type { AgentInfo, SpendingData } from "../types";
+import { SpendingCategoryChart } from "../spending-category-chart";
 import { EXPLORER_ACCOUNT_URL, NETWORK_LABEL } from "../../lib/stellar-network";
 import { getTranslations, type Locale } from "../../i18n";
 import { AGENT_URL } from "../../lib/agent-url";
@@ -20,6 +21,8 @@ export interface WalletTabProps {
   loadingWalletBalance?: boolean;
   onRetryWalletBalance?: () => void;
   loadingAgentInfo?: boolean;
+  /** Spending summary; when present the tab shows the category breakdown (#1185). */
+  spending?: SpendingData | null;
   locale?: Locale;
 }
 
@@ -82,6 +85,7 @@ export function WalletTab({
   walletBalanceError,
   loadingWalletBalance = false,
   onRetryWalletBalance,
+  spending,
   locale = "en",
 }: WalletTabProps) {
   const t = getTranslations(locale);
@@ -673,6 +677,7 @@ export function WalletTab({
           )}
         </div>
       </div>
+      {spending && <SpendingCategoryChart spending={spending} locale={locale} />}
 
       <div className="bg-white rounded-xl border border-slate-200 p-6">
         <h2 className="text-sm font-semibold text-slate-700 mb-3">

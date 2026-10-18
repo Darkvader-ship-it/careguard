@@ -27,7 +27,7 @@ export const PharmacyPriceSchema = z.object({
   pharmacyId: z.string().optional(),
   price: z.number(),
   distance: z.string().optional(),
-  inStock: z.union([z.boolean(), z.literal('unknown')]).optional(),
+  inStock: z.union([z.boolean(), z.literal("unknown")]).optional(),
 });
 
 export const PharmacyCompareResultSchema = z.object({
@@ -69,9 +69,36 @@ export const TransactionSchema = z.object({
   pendingUntil: z.string().optional(),
   status: z.string(),
   category: z.string(),
+  // Optional caregiver-authored memo for record-keeping (Feature: payment memo).
+  memo: z.string().optional(),
+  // Medication order fulfilment lifecycle (Feature: order tracking).
+  order_status: z.enum(["submitted", "ready", "picked_up"]).optional(),
+  order_status_history: z
+    .array(
+      z.object({
+        status: z.enum(["submitted", "ready", "picked_up"]),
+        timestamp: z.string(),
+        updatedBy: z.string(),
+      }),
+    )
+    .optional(),
 });
 
 export type Transaction = z.infer<typeof TransactionSchema>;
+
+export const ORDER_STATUS = {
+  SUBMITTED: "submitted",
+  READY: "ready",
+  PICKED_UP: "picked_up",
+} as const;
+
+export const ORDER_STATUSES = [
+  ORDER_STATUS.SUBMITTED,
+  ORDER_STATUS.READY,
+  ORDER_STATUS.PICKED_UP,
+] as const;
+
+export type OrderStatus = (typeof ORDER_STATUSES)[number];
 
 export const AuditLogSchema = z.object({
   timestamp: z.string(),
@@ -82,13 +109,22 @@ export const AuditLogSchema = z.object({
 
 export type AuditLogEvent = z.infer<typeof AuditLogSchema>;
 
+export const CategoryTotalsSchema = z.object({
+  medications: z.number(),
+  bills: z.number(),
+  serviceFees: z.number(),
+  total: z.number(),
+  count: z.number(),
+});
+
 export const SpendingDataSchema = z.object({
   policy: z.object({
     dailyLimit: z.number(),
     monthlyLimit: z.number(),
     medicationMonthlyBudget: z.number(),
     billMonthlyBudget: z.number(),
-    approvalThreshold: z.number(), holdTimeSeconds: z.number().optional().default(86400),
+    approvalThreshold: z.number(),
+    holdTimeSeconds: z.number().optional().default(86400),
   }),
   spending: z.object({
     medications: z.number(),
@@ -102,9 +138,18 @@ export const SpendingDataSchema = z.object({
   }),
   transactionCount: z.number(),
   recentTransactions: z.array(TransactionSchema),
+  // #1185: per-category totals per range. Optional so older agents still parse.
+  categoryBreakdown: z
+    .object({
+      "7d": CategoryTotalsSchema,
+      "30d": CategoryTotalsSchema,
+      all: CategoryTotalsSchema,
+    })
+    .optional(),
 });
 
 export type SpendingData = z.infer<typeof SpendingDataSchema>;
+export type CategoryTotals = z.infer<typeof CategoryTotalsSchema>;
 
 export type RecipientProfile = {
   name: string;
@@ -167,6 +212,20 @@ export const AdherenceTimelineEventSchema = z.object({
 
 export type AdherenceTimelineEvent = z.infer<typeof AdherenceTimelineEventSchema>;
 
+/** A persisted drug interaction check (#1193). */
+export const InteractionCheckSchema = z.object({
+  id: z.string(),
+  recipient_id: z.string(),
+  medications: z.array(z.string()),
+  interaction_count: z.number(),
+  highest_severity: z.string().nullable(),
+  summary: z.string().nullable(),
+  interactions: z.array(z.unknown()),
+  checked_at: z.string(),
+});
+
+export type InteractionCheck = z.infer<typeof InteractionCheckSchema>;
+
 /** Human-readable reading, e.g. "128/82 mmHg" or "162 lb". */
 export function formatVital(v: Pick<Vital, "type" | "value" | "secondary_value" | "unit">): string {
   const reading =
@@ -211,3 +270,32 @@ export const ItemPresenceEntrySchema = z.object({
 export type ItemPresenceEntry = z.infer<typeof ItemPresenceEntrySchema>;
 
 export type ItemPresenceMap = Record<string, ItemPresenceEntry[]>;
+
+// ── Linked caregivers & handoff notes (#1179, #1180) ──────────────────────────
+// Mirrors services/care-recipients/db.ts.
+
+export const CAREGIVER_ROLES = ["owner", "co-caregiver", "viewer"] as const;
+export type CaregiverRole = (typeof CAREGIVER_ROLES)[number];
+
+export const LinkedCaregiverSchema = z.object({
+  caregiver_user_id: z.string().min(1),
+  email: z.string().nullable(),
+  display_name: z.string().nullable(),
+  role: z.enum(CAREGIVER_ROLES),
+  status: z.enum(["active", "invited"]),
+  created_at: z.string(),
+});
+
+export type LinkedCaregiver = z.infer<typeof LinkedCaregiverSchema>;
+
+export const HANDOFF_NOTE_MAX_LENGTH = 500;
+
+export const HandoffNoteSchema = z.object({
+  id: z.string().min(1),
+  recipient_id: z.string().min(1),
+  author: z.string(),
+  text: z.string(),
+  created_at: z.string(),
+});
+
+export type HandoffNote = z.infer<typeof HandoffNoteSchema>;

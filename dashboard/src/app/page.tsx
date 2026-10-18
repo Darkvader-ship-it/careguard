@@ -13,6 +13,8 @@ import { BillsTab } from "../components/tabs/bills-tab";
 import { MedicationsTab } from "../components/tabs/medications-tab";
 import { OverviewTab } from "../components/tabs/overview-tab";
 import { ApprovalsTab } from "../components/tabs/approvals-tab";
+import { TasksTab } from "../components/tabs/tasks-tab";
+import { HandoffNotesTab } from "../components/tabs/handoff-notes-tab";
 import { PolicyTab } from "../components/tabs/policy-tab";
 import { SettingsTab } from "../components/tabs/settings-tab";
 import { WalletTab } from "../components/tabs/wallet-tab";
@@ -171,6 +173,7 @@ export default function Dashboard() {
             loadingWalletBalance={state.loadingWalletBalance}
             onRetryWalletBalance={state.retryWalletBalance}
             loadingAgentInfo={state.loadingAgentInfo}
+            spending={state.spending}
           />
         )}
         {activeTab === "activity" && (
@@ -190,6 +193,15 @@ export default function Dashboard() {
             onResetAgent={state.resetAgent}
             loadingTransactions={state.loadingTransactions}
             loadingSpending={state.loadingSpending}
+            locale={locale}
+          />
+        )}
+        {activeTab === "tasks" && (
+          <TasksTab recipientId={selectedId ?? recipient.id} locale={locale} />
+        {activeTab === "notes" && (
+          <HandoffNotesTab
+            recipientId={selectedId}
+            authorName={caregiver.name}
             locale={locale}
           />
         )}

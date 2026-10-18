@@ -7,12 +7,12 @@ import {
   DrugInteractionResultSchema,
   PharmacyCompareResultSchema,
   type RecipientProfile,
-  type Vital,
-  type RecipientAllergy,
-  type AllergySeverity,
+  type Transaction,
+  ORDER_STATUS,
 } from "../../lib/types";
 import type { AgentResult } from "../types";
 import { VitalsSection } from "../vitals-section";
+import { InteractionHistorySection } from "../interaction-history-section";
 import { getTranslations, type Locale } from "../../i18n";
 import { AGENT_URL } from "../../lib/agent-url";
 import { agentFetch } from "../../lib/agent-fetch";
@@ -23,12 +23,26 @@ const DEFAULT_MEDS = ["Lisinopril", "Metformin", "Atorvastatin", "Amlodipine"] a
 export interface MedicationsTabProps {
   agentResult: AgentResult | null;
   recipient: RecipientProfile;
-  locale?: Locale;
+  /** All medication transactions — used to show order lifecycle status. */
+  allTransactions?: Transaction[];
 }
 
-export function MedicationsTab({ agentResult, recipient, locale = "en" }: MedicationsTabProps) {
-  const t = getTranslations(locale).medications;
-  const [vitals, setVitals] = useState<Vital[]>([]);
+export function MedicationsTab({
+  agentResult,
+  recipient,
+  allTransactions = [],
+}: MedicationsTabProps) {
+  // Find the most recent medication order for each drug name
+  const latestOrderByDrug = allTransactions
+    .filter((tx) => tx.type === "medication" && tx.order_status)
+    .reduce<Record<string, Transaction>>((acc, tx) => {
+      const key = tx.description.split(" from ")[0].toLowerCase();
+      if (!acc[key] || new Date(tx.timestamp) > new Date(acc[key].timestamp)) {
+        acc[key] = tx;
+      }
+      return acc;
+    }, {});
+
   const hasPriceResults = agentResult?.toolCalls.some(
     (tc) => tc.tool === "compare_pharmacy_prices",
   );
@@ -393,6 +407,35 @@ export function MedicationsTab({ agentResult, recipient, locale = "en" }: Medica
                     >
                       History ({drugHistory.length})
                     </button>
+                <div>
+                  <div className="font-medium text-sm flex items-center gap-2">
+                    {drug}
+                    {latestOrderByDrug[drug.toLowerCase()]?.order_status && (
+                      <span
+                        className={`px-2 py-0.5 rounded text-xs font-medium ${
+                          latestOrderByDrug[drug.toLowerCase()].order_status ===
+                          "picked_up"
+                            ? "bg-green-100 text-green-700"
+                            : latestOrderByDrug[drug.toLowerCase()]
+                                  .order_status === "ready"
+                              ? "bg-amber-100 text-amber-700"
+                              : "bg-slate-100 text-slate-500"
+                        }`}
+                      >
+                        {latestOrderByDrug[drug.toLowerCase()].order_status ===
+                        "picked_up"
+                          ? "✓ Picked up"
+                          : latestOrderByDrug[drug.toLowerCase()]
+                                .order_status === "ready"
+                            ? "⏳ Ready for pickup"
+                            : "📦 Submitted"}
+                      </span>
+                    )}
+                  </div>
+                  <div className="text-xs text-slate-500">
+                    {r
+                      ? `${t.best}: ${r.cheapest.pharmacyName} at $${r.cheapest.price}`
+                      : t.notYetCompared}
                   </div>
                 </div>
 
@@ -532,6 +575,7 @@ export function MedicationsTab({ agentResult, recipient, locale = "en" }: Medica
         </div>
       </div>
       <VitalsSection locale={locale} onVitalsChange={setVitals} />
+      <InteractionHistorySection />
 
       {/* ── Documented Allergies & Adverse Reactions (Issue #1230) ─────────── */}
       <div className="bg-white rounded-xl border border-slate-200 p-6">
